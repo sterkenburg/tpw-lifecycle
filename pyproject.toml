@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "The Perfect Wedding — Supplier Lifecycle Platform"
 requires-python = ">=3.11"
 dependencies = [
+    "certifi>=2026.10.19",
     "pandas>=2.0",
     "numpy>=1.24",
     "pandas-gbq>=0.19",
