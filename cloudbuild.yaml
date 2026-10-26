@@ -11,51 +11,36 @@
 # deliberately left on the `retention*` names, so the image path stays as-is.
 
 steps:
-  # Build the image (immutable :$COMMIT_SHA tag + a moving :latest)
   - name: "gcr.io/cloud-builders/docker"
+    env: [DOCKER_BUILDKIT=1]
+    entrypoint: bash
     args:
-      - "build"
-      - "-t"
-      - "europe-west4-docker.pkg.dev/tpw-ga4-bigquery/tpw-retention/app:$COMMIT_SHA"
-      - "-t"
-      - "europe-west4-docker.pkg.dev/tpw-ga4-bigquery/tpw-retention/app:latest"
-      - "."
+      - -ceu
+      - |
+        docker build -t europe-west4-docker.pkg.dev/tpw-ga4-bigquery/tpw-retention/app:$BUILD_ID .
+        docker push europe-west4-docker.pkg.dev/tpw-ga4-bigquery/tpw-retention/app:$BUILD_ID
+        docker image inspect --format '{{index .RepoDigests 0}}' europe-west4-docker.pkg.dev/tpw-ga4-bigquery/tpw-retention/app:$BUILD_ID > /workspace/release-image
 
-  # Push both tags to Artifact Registry (must precede the job update below)
-  - name: "gcr.io/cloud-builders/docker"
-    args:
-      - "push"
-      - "--all-tags"
-      - "europe-west4-docker.pkg.dev/tpw-ga4-bigquery/tpw-retention/app"
-
-  # Point the Cloud Run Job at the freshly built image.
-  # Wrapped in a retry loop: `jobs update` is a read-modify-write and can fail
-  # with `ABORTED: ... version was specified but current version is ...` if the
-  # job is touched concurrently (e.g. an execution starts mid-build). That's
-  # transient, so we retry with linear backoff. ($COMMIT_SHA is a Cloud Build
-  # substitution; $$-prefixed vars are escaped so they reach bash, not the
-  # substitutor.)
+  # Update configuration only. Do not execute the daily pipeline from CI.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     entrypoint: bash
     args:
-      - "-c"
+      - -ceu
       - |
+        image=$$(cat /workspace/release-image)
+        case "$$image" in europe-west4-docker.pkg.dev/tpw-ga4-bigquery/tpw-retention/app@sha256:*) ;; *) exit 1;; esac
+        # Preserve the bounded retry for concurrent Cloud Run Job updates.
+        updated=false
         for attempt in 1 2 3 4 5; do
-          if gcloud run jobs update tpw-lifecycle-daily \
-               --image europe-west4-docker.pkg.dev/tpw-ga4-bigquery/tpw-retention/app:$COMMIT_SHA \
-               --project tpw-ga4-bigquery \
-               --region europe-west4; then
-            echo "jobs update succeeded on attempt $$attempt"
-            exit 0
+          if gcloud run jobs update tpw-lifecycle-daily --image="$$image" --project=tpw-ga4-bigquery --region=europe-west4 --quiet; then
+            updated=true
+            break
           fi
-          echo "jobs update attempt $$attempt failed; retrying in $$((attempt * 5))s..." >&2
           sleep $$((attempt * 5))
         done
-        echo "jobs update failed after 5 attempts" >&2
-        exit 1
+        test "$$updated" = true
+        gcloud run jobs describe tpw-lifecycle-daily --project=tpw-ga4-bigquery --region=europe-west4 --format='json(spec.template.spec.template.spec.containers[].image,status.conditions)' > /workspace/job.json
+        python3 -c 'import json,sys; d=json.load(open("/workspace/job.json")); assert d["spec"]["template"]["spec"]["template"]["spec"]["containers"][0]["image"]==sys.argv[1]; assert next(c for c in d["status"]["conditions"] if c["type"]=="Ready")["status"]=="True"' "$$image"
 
-# The push-to-deploy trigger runs as a user-specified service account
-# (678140050967-compute@…), which cannot write to the default Cloud Build logs
-# bucket — so logs must go to Cloud Logging explicitly.
 options:
   logging: CLOUD_LOGGING_ONLY
