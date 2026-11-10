@@ -7,6 +7,7 @@ Runs at 7 AM via Cloud Scheduler.
 4. Determine actions (LEGACY — gated OFF, see below)
 5. Save everything to BigQuery
 6. Slack summary (aggregate counts only — never names suppliers)
+7. Rebuild the `outcomes` table (renewal labels for ended terms; best-effort)
 
 The per-supplier emitters in stage 4 (P1 CRM tasks + the deprecated SendGrid
 email flows) PREDATE the holdout system and used to log crm_task intents for
@@ -28,7 +29,7 @@ import pandas as pd
 import yaml
 
 from actions import crm, emails, flows, slack
-from analytics import projected_value, supplier_stats
+from analytics import outcomes, projected_value, supplier_stats
 from data import activity, client, leads, suppliers
 from signals import churn_scorer, cohort, engagement
 
@@ -45,7 +46,7 @@ def run():
     # ------------------------------------------------------------------
     # 1. Load data
     # ------------------------------------------------------------------
-    print("[1/6] Loading data...")
+    print("[1/7] Loading data...")
     df_suppliers = suppliers.get_current()
     df_activity = activity.get_last_90d()
     df_leads = leads.get_last_90d()
@@ -60,7 +61,7 @@ def run():
     # ------------------------------------------------------------------
     # 2. Calculate supplier stats
     # ------------------------------------------------------------------
-    print("[2/6] Calculating supplier stats...")
+    print("[2/7] Calculating supplier stats...")
     stats = supplier_stats.calculate(
         df_suppliers,
         df_activity,
@@ -75,12 +76,15 @@ def run():
     # ------------------------------------------------------------------
     # 3. Calculate signals
     # ------------------------------------------------------------------
-    print("[3/6] Calculating signals...")
+    print("[3/7] Calculating signals...")
     signals = churn_scorer.calculate(stats)
     print(f"        P1: {(signals['priority_tier'] == 'P1').sum()}")
     print(f"        P2: {(signals['priority_tier'] == 'P2').sum()}")
     print(f"        P3: {(signals['priority_tier'] == 'P3').sum()}")
     print(f"        P4: {(signals['priority_tier'] == 'P4').sum()}")
+    decided = signals["priority_tier"].isna()
+    print(f"        No tier (decided): {decided.sum()} "
+          f"{signals.loc[decided, 'renewal_status'].value_counts().to_dict()}")
 
     declining = engagement.detect_decline(signals)
     inactive = engagement.detect_no_activity(signals)
@@ -90,7 +94,7 @@ def run():
     # ------------------------------------------------------------------
     # 4. Determine actions
     # ------------------------------------------------------------------
-    print("[4/6] Determining actions...")
+    print("[4/7] Determining actions...")
     actions_taken = []
 
     if not _LEGACY_ON:
@@ -165,7 +169,7 @@ def run():
     # ------------------------------------------------------------------
     # 5. Save to BigQuery
     # ------------------------------------------------------------------
-    print("[5/6] Saving to BigQuery...")
+    print("[5/7] Saving to BigQuery...")
 
     # Supplier stats — align columns to BigQuery schema
     stats_cols = [
@@ -194,6 +198,7 @@ def run():
         "category_avg_views_60d",
         "category_avg_leads_60d",
         "renewal_status",
+        "num_paid_plans_before",
         "benchmark_views_top10pct",
         "benchmark_leads_top10pct",
         "churn_probability",
@@ -206,6 +211,13 @@ def run():
     for col in stats_cols:
         if col not in stats_df.columns:
             stats_df[col] = None
+
+    # Additive schema change (idempotent): columns added after the table was
+    # created must exist before an append, or the load job rejects the frame.
+    client.execute(
+        f"ALTER TABLE `{client.PROJECT_ID}.{client.DATASET}.supplier_stats_daily` "
+        "ADD COLUMN IF NOT EXISTS num_paid_plans_before INT64"
+    )
 
     # Delete today's rows first to prevent duplicates on re-runs
     client.delete_today("supplier_stats_daily", date_column="stats_date")
@@ -235,7 +247,7 @@ def run():
     # ------------------------------------------------------------------
     # 6. Slack summary
     # ------------------------------------------------------------------
-    print("[6/6] Posting Slack summary...")
+    print("[6/7] Posting Slack summary...")
     # Aggregate reporting over ALL suppliers (counts only, never names) — kept
     # independent of the gated legacy emitters above.
     p1_mask = signals["priority_tier"] == "P1"
@@ -249,6 +261,16 @@ def run():
         revenue_at_risk=revenue_at_risk,
     )
     print("        → Slack sent")
+
+    # ------------------------------------------------------------------
+    # 7. Rebuild outcomes (best-effort: the snapshot above is already saved)
+    # ------------------------------------------------------------------
+    print("[7/7] Rebuilding outcomes...")
+    try:
+        df_outcomes = outcomes.build()
+        print(f"        → outcomes ({len(df_outcomes)} terms)")
+    except Exception as e:
+        print(f"        outcomes rebuild failed (non-fatal): {e}")
 
     print(f"\n{'=' * 60}")
     print("Pipeline complete.")

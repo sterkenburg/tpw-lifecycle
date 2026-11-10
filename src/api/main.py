@@ -123,5 +123,7 @@ def get_supplier_stats(profile_id: str):
         "benchmark_views_top10pct": int(row.get("benchmark_views_top10pct", 250)),
         "benchmark_leads_top10pct": int(row.get("benchmark_leads_top10pct", 12)),
         "churn_probability": round(row.get("churn_probability", 0), 2),
-        "priority_tier": row.get("priority_tier", "P4"),
+        # NULL tier = decided supplier (scheduled cancellation, renewed, churned).
+        "priority_tier": tier if isinstance(tier := row.get("priority_tier"), str) else None,
+        "renewal_status": status if isinstance(status := row.get("renewal_status"), str) else None,
     }

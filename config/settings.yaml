@@ -67,12 +67,42 @@ tables:
 # Note: old system used 0.304 (dashboard), 0.60 (production), 0.78 (hybrid)
 # We use a single conservative threshold to reduce false positives
 thresholds:
-  churn_p1: 0.80               # urgent: CRM task  (~9% of suppliers)
-  churn_p2: 0.55               # high: email + monitor  (~20% of suppliers)
-  churn_p3: 0.35               # medium: nurture  (~21% of suppliers)
+  # Tiers apply ONLY to undecided suppliers (renewal_status = active). Scheduled
+  # cancellations (will_churn), renewed and churned suppliers get no tier.
+  # Cutoffs set 2026-11-10 on a T-60 backtest of 174 undecided terms (23 churned):
+  # non-renewal P1 50%, P2 25%, P3 11%, P4 5%. Re-check once outcomes accumulate.
+  churn_p1: 0.55               # urgent: call  (~8% of undecided)
+  churn_p2: 0.45               # high: email + monitor  (~10%)
+  churn_p3: 0.30               # medium: nurture  (~38%)
   no_lead_days: 45             # trigger re-engagement
   renewal_days: 60             # trigger renewal prep
   engagement_decline: -0.5     # 50% drop vs previous month
+
+# Churn risk score (src/signals/churn_scorer.py). Hand-set, rule-based: a relative
+# risk ranking, not a calibrated probability.
+churn_scoring:
+  # Starting point = historical non-renewal rate by number of PRIOR paid plans
+  # (annual terms ending 2024-06..2026-09, n=3,276; churn review 2026-11-10).
+  # Keys are the minimum prior-plan count for the bucket.
+  prior_plan_base:
+    0: 0.40                    # first paid term
+    1: 0.32
+    2: 0.23
+    3: 0.19                    # 3-4
+    5: 0.135                   # 5-7
+    8: 0.11                    # 8+
+  unknown_plan_history_base: 0.40   # num_paid_plans_before missing (~7%; churn ~41%)
+  # Behaviour adjustments (added to the base)
+  no_views_90d: 0.15           # no profile views at all in the 90-day window
+  per_day_since_last_view: 0.0025   # capped at view_recency_cap_days
+  view_recency_cap_days: 60
+  low_views_60d: 0.05          # fewer than low_views_threshold views in 60 days
+  low_views_threshold: 10
+  views_down_50pct: 0.08       # equal-window trend <= -50%
+  views_down_20pct: 0.03       # equal-window trend <= -20%
+  no_leads_60d: 0.05           # no lead in 60 days (or none in the 90-day window)
+  renewal_within_30d: 0.05     # 0-30 days to plan_end
+  ended_no_renewal: 0.15       # plan_end passed, no renewal or cancellation booked
 
 # API keys (use env vars in production)
 # sendgrid_api_key: "${SENDGRID_API_KEY}"

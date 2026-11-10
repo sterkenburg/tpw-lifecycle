@@ -85,8 +85,9 @@ export type SupplierStats = {
   profile_views_60_90d: number;
   engagement_trend: number;
   leads_60d: number;
-  days_since_last_lead: number;
-  days_since_last_login: number;
+  days_since_last_lead: number | null;
+  // Days since the last PROFILE VIEW by a visitor (historical column name).
+  days_since_last_login: number | null;
   estimated_value_30d: number | null;
   benchmark_views_top10pct: number | null;
   benchmark_leads_top10pct: number | null;
@@ -95,8 +96,10 @@ export type SupplierStats = {
   category_avg_views_60d: number | null;
   category_avg_leads_60d: number | null;
   renewal_status: string | null;
+  num_paid_plans_before?: number | null;
   churn_probability: number;
-  priority_tier: string;
+  // NULL for decided suppliers (cancelling, renewed, churned).
+  priority_tier: string | null;
   risk_factors: string;
   recommended_action: string;
   stats_date: string;

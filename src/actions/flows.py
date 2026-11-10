@@ -30,6 +30,12 @@ _THRESHOLDS = _CONFIG.get("thresholds", {})
 _EMAIL_CFG = _CONFIG.get("email", {})
 
 NO_LEAD_DAYS = _THRESHOLDS.get("no_lead_days", 45)
+
+# Booked-outcome statuses that must not get nurture emails: a scheduled Gratis
+# downgrade is a save/exit conversation, and churned suppliers go to winback.
+# (These used to be excluded implicitly because they were always P1; decided
+# suppliers no longer carry a tier.)
+_NO_NURTURE_STATUSES = {"will_churn", "lapsed"}
 RENEWAL_DAYS = _THRESHOLDS.get("renewal_days", 60)
 MONTHLY_SEND_DAY = _EMAIL_CFG.get("monthly_send_day", 1)
 DEDUP_DAYS = _EMAIL_CFG.get(
@@ -125,15 +131,20 @@ def _renewal_action(row) -> EmailAction | None:
 
 
 def _reengagement_action(row) -> EmailAction | None:
-    """Re-engagement: no lead for NO_LEAD_DAYS, and not a P1 (P1 = human call)."""
-    if row.get("priority_tier") == "P1":
+    """Re-engagement: no lead for NO_LEAD_DAYS, and not a P1 (P1 = human call).
+
+    days_since_last_lead is NULL when there was no lead in the whole 90-day
+    window; that qualifies (shown as "90+").
+    """
+    if row.get("priority_tier") == "P1" or row.get("renewal_status") in _NO_NURTURE_STATUSES:
         return None
-    days = row.get("days_since_last_lead")
-    if days is None or pd.isna(days):
-        return None
-    days = int(days)
-    if days < NO_LEAD_DAYS:
-        return None
+    raw = row.get("days_since_last_lead")
+    if raw is None or pd.isna(raw) or int(raw) >= 999:
+        days: int | str = "90+"
+    else:
+        days = int(raw)
+        if days < NO_LEAD_DAYS:
+            return None
     return EmailAction(
         profile_id=str(row["profile_id"]),
         flow="re_engagement",
@@ -153,7 +164,7 @@ def _monthly_action(row, month_name: str) -> EmailAction | None:
     P1 suppliers are being actively worked by a human (CRM task), so they are
     not also sent the upbeat automated recap.
     """
-    if row.get("priority_tier") == "P1":
+    if row.get("priority_tier") == "P1" or row.get("renewal_status") in _NO_NURTURE_STATUSES:
         return None
     return EmailAction(
         profile_id=str(row["profile_id"]),

@@ -55,6 +55,7 @@ tables = {
         category_avg_views_60d FLOAT64,
         category_avg_leads_60d FLOAT64,
         renewal_status STRING,
+        num_paid_plans_before INT64,
         churn_probability FLOAT64,
         priority_tier STRING,
         risk_factors STRING,

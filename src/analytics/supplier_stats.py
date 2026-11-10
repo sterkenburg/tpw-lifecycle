@@ -1,8 +1,18 @@
 """Aggregate per-supplier statistics from raw data. One table to rule them all."""
 
-from datetime import datetime
-
 import pandas as pd
+
+# Engagement trend compares two EQUAL windows of this many days, both anchored on
+# the latest date present in the GA4 activity feed (the Dataform export lands
+# after the daily job runs, so "today" would leave the recent window short and
+# read as a decline for everyone).
+TREND_WINDOW_DAYS = 30
+# Below this many views in the earlier window the ratio is noise; trend = 0.
+TREND_MIN_BASE_VIEWS = 5
+
+# Count columns where "no rows" genuinely means zero. Other columns (metadata,
+# email, plan history) keep their NULLs.
+_COUNT_COLUMNS = ["profile_views_60d", "profile_views_60_90d", "leads_60d"]
 
 
 def calculate(
@@ -39,20 +49,43 @@ def calculate(
         .rename("profile_views_60_90d")
     )
 
-    # --- Leads (last 60d) ---
-    leads_60d = leads[leads["event_date"] >= today - pd.Timedelta(days=60)]
-    lead_counts = (
-        leads_60d.groupby("profile_id")
-        .size()
-        .rename("leads_60d")
+    # --- Equal-window engagement trend (anchored on the latest activity date) ---
+    anchor = activity["event_date"].max() if not activity.empty else today
+    if pd.isna(anchor):
+        anchor = today
+    window = pd.Timedelta(days=TREND_WINDOW_DAYS)
+    double_window = pd.Timedelta(days=2 * TREND_WINDOW_DAYS)
+    views_recent = (
+        activity[activity["event_date"] > anchor - window]
+        .groupby("profile_id").size().rename("_views_recent")
     )
+    views_prior = (
+        activity[
+            (activity["event_date"] > anchor - double_window)
+            & (activity["event_date"] <= anchor - window)
+        ]
+        .groupby("profile_id").size().rename("_views_prior")
+    )
+
+    # --- Leads (last 60d) ---
+    # Lead rows are pre-aggregated per supplier/day/type (leads.get_last_90d), so
+    # the count is the SUM of lead_count, not the number of rows.
+    leads_60d = leads[leads["event_date"] >= today - pd.Timedelta(days=60)]
+    if "lead_count" in leads_60d.columns:
+        lead_counts = leads_60d.groupby("profile_id")["lead_count"].sum().rename("leads_60d")
+    else:
+        lead_counts = leads_60d.groupby("profile_id").size().rename("leads_60d")
 
     # --- Merge ---
     df = df.set_index("profile_id")
     df = df.join(views_60d, how="left")
     df = df.join(views_60_90d, how="left")
     df = df.join(lead_counts, how="left")
-    df = df.fillna(0).reset_index()
+    df = df.join(views_recent, how="left")
+    df = df.join(views_prior, how="left")
+    df = df.reset_index()
+    for col in [*_COUNT_COLUMNS, "_views_recent", "_views_prior"]:
+        df[col] = df[col].fillna(0)
 
     # --- Contract-period totals ---
     if contract_activity is not None and not contract_activity.empty:
@@ -88,11 +121,13 @@ def calculate(
     df["profile_views_60_90d"] = df["profile_views_60_90d"].astype(int)
     df["leads_60d"] = df["leads_60d"].astype(int)
 
-    # Engagement trend: % change vs previous 60d period
-    df["engagement_trend"] = (
-        (df["profile_views_60d"] - df["profile_views_60_90d"])
-        / df["profile_views_60_90d"].replace(0, pd.NA)
-    ).fillna(0)
+    # Engagement trend: % change in views, last 30 days vs the 30 days before
+    # (equal windows). Was 60d vs the prior 30d, which read +100% for a supplier
+    # with perfectly flat traffic.
+    prior = df["_views_prior"].astype(float)
+    trend = (df["_views_recent"].astype(float) - prior) / prior.where(prior > 0)
+    df["engagement_trend"] = trend.where(prior >= TREND_MIN_BASE_VIEWS, 0.0).fillna(0.0)
+    df = df.drop(columns=["_views_recent", "_views_prior"])
 
     # Days until renewal
     df["plan_end"] = pd.to_datetime(df["plan_end"], errors="coerce")
@@ -105,18 +140,30 @@ def calculate(
         .rename("last_lead_date")
     )
     df = df.set_index("profile_id").join(last_lead, how="left").reset_index()
-    df["days_since_last_lead"] = (today - pd.to_datetime(df["last_lead_date"], errors="coerce")).dt.days
-    df["days_since_last_lead"] = df["days_since_last_lead"].fillna(999).astype(int)
+    # NULL (not a 999 sentinel) when there was no lead in the 90-day window.
+    df["days_since_last_lead"] = (
+        (today - pd.to_datetime(df["last_lead_date"], errors="coerce")).dt.days.astype("Int64")
+    )
 
-    # Last login — approximate from GA4
-    last_login = (
+    # Days since the last PROFILE VIEW by a visitor. The column keeps its
+    # historical name (days_since_last_login) for schema compatibility, but GA4
+    # has no supplier-login signal: this measures couple demand, not supplier
+    # engagement. NULL when the profile had no views in the 90-day window.
+    last_view = (
         activity.groupby("profile_id")["event_date"]
         .max()
         .rename("last_activity_date")
     )
-    df = df.set_index("profile_id").join(last_login, how="left").reset_index()
-    df["days_since_last_login"] = (today - pd.to_datetime(df["last_activity_date"], errors="coerce")).dt.days
-    df["days_since_last_login"] = df["days_since_last_login"].fillna(999).astype(int)
+    df = df.set_index("profile_id").join(last_view, how="left").reset_index()
+    df["days_since_last_login"] = (
+        (today - pd.to_datetime(df["last_activity_date"], errors="coerce")).dt.days.astype("Int64")
+    )
+
+    # Paid plans before the current one (loyalty). NULL when the source lacks it.
+    if "num_paid_plans_before" in df.columns:
+        df["num_paid_plans_before"] = (
+            pd.to_numeric(df["num_paid_plans_before"], errors="coerce").round().astype("Int64")
+        )
 
     # Meta
     df["stats_date"] = today
