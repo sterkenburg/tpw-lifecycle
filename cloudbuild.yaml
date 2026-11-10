@@ -39,8 +39,10 @@ steps:
           sleep $$((attempt * 5))
         done
         test "$$updated" = true
-        gcloud run jobs describe tpw-lifecycle-daily --project=tpw-ga4-bigquery --region=europe-west4 --format='json(spec.template.spec.template.spec.containers[].image,status.conditions)' > /workspace/job.json
-        python3 -c 'import json,sys; d=json.load(open("/workspace/job.json")); assert d["spec"]["template"]["spec"]["template"]["spec"]["containers"][0]["image"]==sys.argv[1]; assert next(c for c in d["status"]["conditions"] if c["type"]=="Ready")["status"]=="True"' "$$image"
+        # Verify with gcloud projections only: cloud-sdk:latest no longer ships python3.
+        live_image=$$(gcloud run jobs describe tpw-lifecycle-daily --project=tpw-ga4-bigquery --region=europe-west4 --format='value(spec.template.spec.template.spec.containers[0].image)')
+        test "$$live_image" = "$$image"
+        gcloud run jobs describe tpw-lifecycle-daily --project=tpw-ga4-bigquery --region=europe-west4 --flatten='status.conditions' --format='value(status.conditions.type,status.conditions.status)' | grep -qx "Ready$$(printf '\t')True"
 
 options:
   logging: CLOUD_LOGGING_ONLY
