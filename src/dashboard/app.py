@@ -65,6 +65,13 @@ actions = load_actions()
 # ------------------------------------------------------------------
 # KPIs
 # ------------------------------------------------------------------
+# Decided suppliers carry no risk tier; show their booked status instead so a
+# scheduled cancellation stays visible (it is a save call, not a tier).
+_STATUS_LABELS = {"will_churn": "Cancelling", "already_renewed": "Renewed", "lapsed": "Churned"}
+df["tier_or_status"] = df["priority_tier"].where(
+    df["priority_tier"].notna(), df["renewal_status"].map(_STATUS_LABELS)
+)
+
 p1 = df[df["priority_tier"] == "P1"]
 p2 = df[df["priority_tier"] == "P2"]
 p3 = df[df["priority_tier"] == "P3"]
@@ -83,8 +90,8 @@ k4.metric("P2 (High)", len(p2))
 st.sidebar.header("Filters")
 show_tier = st.sidebar.multiselect(
     "Priority",
-    ["P1", "P2", "P3", "P4"],
-    default=["P1", "P2"],
+    ["P1", "P2", "P3", "P4", "Cancelling", "Renewed", "Churned"],
+    default=["P1", "P2", "Cancelling"],
 )
 show_category = st.sidebar.multiselect(
     "Category",
@@ -98,9 +105,9 @@ show_am = st.sidebar.multiselect(
 )
 
 filtered = df[
-    (df["priority_tier"].isin(show_tier))
-    & (df["category"].isin(show_category))
-    & (df["account_manager"].isin(show_am))
+    (df["tier_or_status"].isin(show_tier))
+    & (df["category"].isin(show_category) | df["category"].isna())
+    & (df["account_manager"].isin(show_am) | df["account_manager"].isna())
 ]
 
 # ------------------------------------------------------------------
@@ -116,12 +123,13 @@ filtered["profile_link"] = filtered["profile_id"].apply(
 
 # Color by tier
 def color_tier(val):
-    colors = {"P1": "color: red", "P2": "color: orange", "P3": "color: gold", "P4": "color: green"}
+    colors = {"P1": "color: red", "P2": "color: orange", "P3": "color: gold", "P4": "color: green",
+              "Cancelling": "color: red"}
     return colors.get(val, "")
 
 # Select display columns
 display_cols = [
-    "priority_tier",
+    "tier_or_status",
     "profile_name",
     "account_manager",
     "category",
@@ -134,9 +142,9 @@ display_cols = [
 ]
 
 st.dataframe(
-    filtered[display_cols].style.map(color_tier, subset=["priority_tier"]),
+    filtered[display_cols].style.map(color_tier, subset=["tier_or_status"]),
     column_config={
-        "priority_tier": st.column_config.TextColumn("Tier", width="small"),
+        "tier_or_status": st.column_config.TextColumn("Tier", width="small"),
         "profile_name": st.column_config.TextColumn("Supplier", width="medium"),
         "account_manager": st.column_config.TextColumn("AM", width="small"),
         "category": st.column_config.TextColumn("Category", width="small"),

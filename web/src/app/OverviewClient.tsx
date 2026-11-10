@@ -5,15 +5,14 @@ import { SupplierStats } from "@/lib/bigquery";
 import { StatCard } from "@/components/StatCard";
 import { SearchBar } from "@/components/SearchBar";
 import { SupplierTable } from "@/components/SupplierTable";
+import { effectiveTier } from "@/lib/status";
+
+// "None" = decided suppliers (cancelling, renewed, churned): no risk tier.
+const TIER_OPTIONS = ["P1", "P2", "P3", "P4", "None"];
 
 export function OverviewClient({ suppliers }: { suppliers: SupplierStats[] }) {
   const [search, setSearch] = useState("");
-  const [tierFilter, setTierFilter] = useState<string[]>([
-    "P1",
-    "P2",
-    "P3",
-    "P4",
-  ]);
+  const [tierFilter, setTierFilter] = useState<string[]>(TIER_OPTIONS);
   const [amFilter, setAmFilter] = useState<string[]>([]);
 
   const ams = useMemo(
@@ -30,15 +29,16 @@ export function OverviewClient({ suppliers }: { suppliers: SupplierStats[] }) {
         !search ||
         s.profile_name.toLowerCase().includes(search.toLowerCase()) ||
         s.profile_id.includes(search);
-      const matchesTier = tierFilter.includes(s.priority_tier);
+      const matchesTier = tierFilter.includes(effectiveTier(s) ?? "None");
       const matchesAm =
         amFilter.length === 0 || amFilter.includes(s.account_manager ?? "");
       return matchesSearch && matchesTier && matchesAm;
     });
   }, [suppliers, search, tierFilter, amFilter]);
 
-  const p1 = suppliers.filter((s) => s.priority_tier === "P1");
-  const p2 = suppliers.filter((s) => s.priority_tier === "P2");
+  const p1 = suppliers.filter((s) => effectiveTier(s) === "P1");
+  const p2 = suppliers.filter((s) => effectiveTier(s) === "P2");
+  const cancelling = suppliers.filter((s) => s.renewal_status === "will_churn");
   const revenueAtRisk =
     p1.reduce((sum, s) => sum + (s.plan_value ?? 0), 0) +
     p2.reduce((sum, s) => sum + (s.plan_value ?? 0), 0);
@@ -53,7 +53,7 @@ export function OverviewClient({ suppliers }: { suppliers: SupplierStats[] }) {
       </div>
 
       {/* KPIs */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
         <StatCard label="Suppliers" value={suppliers.length} />
         <StatCard
           label="Revenue at Risk"
@@ -62,6 +62,11 @@ export function OverviewClient({ suppliers }: { suppliers: SupplierStats[] }) {
         />
         <StatCard label="P1 (Urgent)" value={p1.length} color="red" />
         <StatCard label="P2 (High)" value={p2.length} color="orange" />
+        <StatCard
+          label="Cancellation scheduled"
+          value={cancelling.length}
+          subtext="Gratis booked: save or exit interview"
+        />
       </div>
 
       {/* Filters */}
@@ -73,8 +78,8 @@ export function OverviewClient({ suppliers }: { suppliers: SupplierStats[] }) {
             <label className="block text-xs font-medium text-gray-500 mb-1">
               Priority Tier
             </label>
-            <div className="flex gap-2">
-              {["P1", "P2", "P3", "P4"].map((tier) => (
+            <div className="flex flex-wrap gap-2">
+              {TIER_OPTIONS.map((tier) => (
                 <button
                   key={tier}
                   onClick={() =>
@@ -92,11 +97,13 @@ export function OverviewClient({ suppliers }: { suppliers: SupplierStats[] }) {
                         ? "bg-orange-50 text-orange-700 border-orange-200"
                         : tier === "P3"
                         ? "bg-yellow-50 text-yellow-700 border-yellow-200"
-                        : "bg-green-50 text-green-700 border-green-200"
+                        : tier === "P4"
+                        ? "bg-green-50 text-green-700 border-green-200"
+                        : "bg-gray-100 text-gray-700 border-gray-300"
                       : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
                   }`}
                 >
-                  {tier}
+                  {tier === "None" ? "No tier (decided)" : tier}
                 </button>
               ))}
             </div>

@@ -6,12 +6,10 @@ import pandas as pd
 def detect_decline(stats: pd.DataFrame, threshold: float = -0.5) -> pd.DataFrame:
     """Flag suppliers with significant engagement decline.
 
-    Returns a subset of suppliers where profile views dropped >50% vs previous month.
+    engagement_trend compares profile views over two equal 30-day windows (see
+    supplier_stats.TREND_WINDOW_DAYS), so a value <= -0.5 means views halved.
     """
-    declining = stats[
-        (stats["engagement_trend"] <= threshold)
-        & (stats["profile_views_60d"] < stats["profile_views_60_90d"])
-    ].copy()
+    declining = stats[stats["engagement_trend"] <= threshold].copy()
     declining["signal_type"] = "engagement_decline"
     declining["signal_severity"] = declining["engagement_trend"].apply(
         lambda x: "severe" if x <= -0.75 else "moderate"
@@ -20,10 +18,16 @@ def detect_decline(stats: pd.DataFrame, threshold: float = -0.5) -> pd.DataFrame
 
 
 def detect_no_activity(stats: pd.DataFrame, days: int = 30) -> pd.DataFrame:
-    """Flag suppliers with zero logins in the last N days."""
-    inactive = stats[stats["days_since_last_login"] > days].copy()
+    """Flag suppliers whose profile had no visitor views in the last N days.
+
+    days_since_last_login holds days since the last PROFILE VIEW (NULL = no views
+    in the 90-day window, which counts as inactive).
+    """
+    since = pd.to_numeric(stats["days_since_last_login"], errors="coerce")
+    inactive = stats[since.isna() | (since > days)].copy()
     inactive["signal_type"] = "no_activity"
-    inactive["signal_severity"] = inactive["days_since_last_login"].apply(
-        lambda x: "severe" if x > 60 else "moderate"
-    )
+    since_inactive = pd.to_numeric(inactive["days_since_last_login"], errors="coerce")
+    inactive["signal_severity"] = [
+        "severe" if pd.isna(d) or d > 60 else "moderate" for d in since_inactive
+    ]
     return inactive

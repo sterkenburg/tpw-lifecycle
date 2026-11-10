@@ -4,7 +4,8 @@ import {
   getActionsForSupplier,
   getInterventionsForSupplier,
 } from "@/lib/bigquery";
-import { TierBadge } from "@/components/TierBadge";
+import { StatusBadge, TierBadge } from "@/components/TierBadge";
+import { effectiveTier, knownDays } from "@/lib/status";
 import { ActionHistory } from "@/components/ActionHistory";
 import { notFound } from "next/navigation";
 
@@ -27,7 +28,11 @@ export default async function SupplierPage({
     getInterventionsForSupplier(id),
   ]);
 
-  const riskPercent = Math.round(supplier.churn_probability * 100);
+  const riskScore = Math.round((supplier.churn_probability ?? 0) * 100);
+  const tier = effectiveTier(supplier);
+  const daysSinceView = knownDays(supplier.days_since_last_login);
+  const daysSinceLead = knownDays(supplier.days_since_last_lead);
+  const priorPlans = supplier.num_paid_plans_before;
 
   return (
     <div className="space-y-6">
@@ -50,17 +55,8 @@ export default async function SupplierPage({
               <h1 className="text-2xl font-bold text-gray-900">
                 {supplier.profile_name}
               </h1>
-              <TierBadge tier={supplier.priority_tier} />
-              {supplier.renewal_status === "already_renewed" && (
-                <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full font-medium">
-                  Already renewed
-                </span>
-              )}
-              {supplier.renewal_status === "will_churn" && (
-                <span className="text-xs bg-red-100 text-red-700 px-2 py-1 rounded-full font-medium">
-                  Will churn
-                </span>
-              )}
+              <TierBadge tier={tier} />
+              <StatusBadge status={supplier.renewal_status} size="md" />
             </div>
             <p className="text-sm text-gray-500 mt-1">
               {supplier.category} · {supplier.account_manager ?? "No AM"}
@@ -94,9 +90,11 @@ export default async function SupplierPage({
                 : "text-gray-900"
             }`}
           >
-            {supplier.days_until_renewal != null
-              ? `${supplier.days_until_renewal} days`
-              : "—"}
+            {supplier.days_until_renewal == null
+              ? "Unknown"
+              : supplier.days_until_renewal < 0
+              ? `Ended ${-supplier.days_until_renewal} days ago`
+              : `${supplier.days_until_renewal} days`}
           </p>
         </div>
         <div className="bg-white rounded-xl border border-gray-200 p-4">
@@ -141,7 +139,7 @@ export default async function SupplierPage({
       <div className="grid md:grid-cols-2 gap-6">
         <div className="bg-white rounded-xl border border-gray-200 p-6">
           <h2 className="text-sm font-semibold text-gray-900 mb-4">
-            Churn Risk
+            Risk Score
           </h2>
           <div className="flex items-center gap-4">
             <div className="relative w-24 h-24">
@@ -155,15 +153,17 @@ export default async function SupplierPage({
                 />
                 <path
                   className={
-                    riskPercent >= 80
+                    tier === "P1"
                       ? "text-red-500"
-                      : riskPercent >= 55
+                      : tier === "P2"
                       ? "text-orange-500"
-                      : riskPercent >= 35
+                      : tier === "P3"
                       ? "text-yellow-500"
-                      : "text-green-500"
+                      : tier === "P4"
+                      ? "text-green-500"
+                      : "text-gray-400"
                   }
-                  strokeDasharray={`${riskPercent}, 100`}
+                  strokeDasharray={`${riskScore}, 100`}
                   d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
                   fill="none"
                   stroke="currentColor"
@@ -172,19 +172,23 @@ export default async function SupplierPage({
               </svg>
               <div className="absolute inset-0 flex items-center justify-center">
                 <span className="text-lg font-bold text-gray-900">
-                  {riskPercent}%
+                  {riskScore}
                 </span>
               </div>
             </div>
             <div>
               <p className="text-sm font-medium text-gray-900">
-                {supplier.priority_tier} —{" "}
+                {tier ? `${tier}: ` : ""}
                 {supplier.risk_factors !== "Stable"
                   ? supplier.risk_factors
                   : "No major risk factors"}
               </p>
               <p className="text-xs text-gray-500 mt-1">
                 {supplier.recommended_action}
+              </p>
+              <p className="text-xs text-gray-400 mt-2">
+                Relative risk score out of 100, not a probability.
+                {tier ? "" : " No tier: the renewal outcome is already booked."}
               </p>
             </div>
           </div>
@@ -196,17 +200,22 @@ export default async function SupplierPage({
           </h2>
           <div className="space-y-3">
             <SignalRow
-              label="Days since last login"
-              value={supplier.days_since_last_login}
-              warning={supplier.days_since_last_login > 30}
+              label="Previous paid plans"
+              value={priorPlans ?? "Unknown"}
+              warning={priorPlans == null || priorPlans === 0}
+            />
+            <SignalRow
+              label="Days since last profile view"
+              value={daysSinceView ?? "No views in 90 days"}
+              warning={daysSinceView == null || daysSinceView > 30}
             />
             <SignalRow
               label="Days since last lead"
-              value={supplier.days_since_last_lead}
-              warning={supplier.days_since_last_lead > 60}
+              value={daysSinceLead ?? "None in 90 days"}
+              warning={daysSinceLead == null || daysSinceLead > 60}
             />
             <SignalRow
-              label="Engagement trend"
+              label="Views trend (30d vs prior 30d)"
               value={`${(supplier.engagement_trend * 100).toFixed(0)}%`}
               warning={supplier.engagement_trend < -0.5}
             />

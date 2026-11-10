@@ -53,7 +53,9 @@ def get_current() -> pd.DataFrame:
     The current plan is the latest PAID plan (a scheduled trailing Gratis row
     never shadows a running paid term). The earliest future plan sets the
     renewal status: Gratis ⇒ 'will_churn' (cancellation already scheduled),
-    paid ⇒ 'already_renewed', none ⇒ 'active'.
+    paid ⇒ 'already_renewed', none ⇒ 'active'. A paid term that has ended with
+    its Gratis successor already running ⇒ 'lapsed' (churned; kept here for the
+    30-day grace window so the dashboard shows it as churned, not at risk).
 
     Includes an `email` column if a supplier email source is configured
     (sources.supplier_email_table / supplier_email_column); otherwise `email`
@@ -95,6 +97,18 @@ def get_current() -> pd.DataFrame:
               AND plan_start > CURRENT_DATE()
         )
         WHERE rn = 1
+    ),
+    started_gratis AS (
+        -- A Gratis plan that has ALREADY started is the realised downgrade: the
+        -- supplier has churned. `next_plan` only sees future plans, so without
+        -- this the status fell back to 'active' the day the Gratis row began and
+        -- churned suppliers sat in the at-risk list for the 30-day grace window.
+        SELECT profile_id, MAX(plan_start) AS gratis_start
+        FROM `{_BUSINESS_TABLE}`
+        WHERE profile_id IS NOT NULL
+          AND plan_name = 'Gratis'
+          AND plan_start <= CURRENT_DATE()
+        GROUP BY profile_id
     )
     SELECT
         b.profile_id,
@@ -114,6 +128,11 @@ def get_current() -> pd.DataFrame:
         np.next_plan_name,
         np.next_plan_start,
         CASE
+            -- Paid term over and its Gratis successor already running ⇒ churned.
+            -- Same 'lapsed' marker as get_lapsed(): outside RETAINED_STATUSES, so
+            -- it routes to the winback/lapsed stage instead of the at-risk tiers.
+            WHEN b.plan_end < CURRENT_DATE()
+                 AND sg.gratis_start > b.plan_start THEN 'lapsed'
             WHEN np.next_plan_name = 'Gratis' THEN 'will_churn'
             WHEN np.next_plan_name IS NOT NULL
                  AND np.next_plan_name != 'Gratis' THEN 'already_renewed'
@@ -123,7 +142,9 @@ def get_current() -> pd.DataFrame:
     LEFT JOIN `{_PROFILES_TABLE}` p
         ON b.profile_id = p.profile_id
     LEFT JOIN next_plan np
-        ON b.profile_id = np.profile_id{email_join}
+        ON b.profile_id = np.profile_id
+    LEFT JOIN started_gratis sg
+        ON b.profile_id = sg.profile_id{email_join}
     WHERE b.plan_end >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
     """
     df = query(sql)
