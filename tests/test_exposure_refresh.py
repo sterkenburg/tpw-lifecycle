@@ -1,8 +1,8 @@
-"""Exposure refresh window: overlap the newest rows so outages get backfilled."""
+"""Exposure refresh window: repair late data and gaps inside the feature window."""
 
 import sys
 import types
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -20,14 +20,25 @@ def exposure(monkeypatch):
     sys.modules.pop("data.exposure", None)
 
 
-def test_normal_day_rebuilds_last_three_days(exposure):
-    assert exposure.refresh_start(date(2026, 11, 10), date(2026, 11, 8)) == date(2026, 11, 5)
+def _days(end: date, n: int, skip: set[date] = frozenset()) -> set[date]:
+    return {end - timedelta(days=i) for i in range(n)} - set(skip)
+
+
+def test_normal_day_rebuilds_last_days(exposure):
+    present = _days(date(2026, 11, 8), 120)
+    assert exposure.refresh_start(date(2026, 11, 10), present) == date(2026, 11, 5)
 
 
 def test_outage_is_backfilled_from_newest_present_day(exposure):
-    assert exposure.refresh_start(date(2026, 11, 10), date(2026, 11, 1)) == date(2026, 10, 29)
+    present = _days(date(2026, 11, 1), 120)
+    assert exposure.refresh_start(date(2026, 11, 10), present) == date(2026, 10, 29)
+
+
+def test_older_gap_is_repaired_after_newer_days_arrive(exposure):
+    present = _days(date(2026, 11, 8), 120, skip={date(2026, 11, 2)})
+    assert exposure.refresh_start(date(2026, 11, 10), present) == date(2026, 11, 2)
 
 
 def test_backfill_is_bounded(exposure):
-    assert exposure.refresh_start(date(2026, 11, 10), date(2025, 1, 1)) == date(2026, 7, 13)
-    assert exposure.refresh_start(date(2026, 11, 10), None) == date(2026, 11, 7)
+    assert exposure.refresh_start(date(2026, 11, 10), {date(2025, 1, 1)}) == date(2026, 7, 13)
+    assert exposure.refresh_start(date(2026, 11, 10), set()) == date(2026, 11, 7)

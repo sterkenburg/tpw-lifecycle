@@ -79,13 +79,14 @@ def run():
     # 1. Load data
     # ------------------------------------------------------------------
     print("[1/7] Loading data...")
-    # Refresh the profile-view rollup first. The window starts 3 days before the
-    # newest date already present (the GA4 source lags ~2 days), so days missed
-    # during an outage are rebuilt once the source catches up. Atomic (one
+    # Refresh the profile-view rollup first. The window covers the last days
+    # before the newest present date (the GA4 source lags ~2 days) and any
+    # missing day in the 90-day feature window, so outage gaps are rebuilt once
+    # the source has them. Atomic (one
     # transaction): a failure leaves the previous rows intact, and the check
     # below decides whether the feed is complete and recent enough to publish.
     try:
-        start = exposure.refresh_start(date.today(), exposure.latest_date())
+        start = exposure.refresh_start(date.today(), exposure.present_dates(date.today()))
         refreshed = exposure.build(start.isoformat(), date.today().isoformat())
         print(f"        Exposure rollup refreshed from {start}: {refreshed:,} rows")
     except Exception as e:

@@ -72,28 +72,39 @@ def ensure_table() -> None:
     )
 
 
-def latest_date() -> date | None:
-    """Latest date present in the rollup (None when empty)."""
-    df = client.query_eu(f"SELECT MAX(date) AS d FROM `{_TABLE}`")
-    value = df["d"].iloc[0] if len(df) else None
-    if value is None or str(value) in ("NaT", "None", "nan"):
-        return None
-    return date.fromisoformat(str(value)[:10])
+def present_dates(today: date, lookback_days: int = 120) -> set[date]:
+    """Dates with at least one profile view in the rollup over the lookback."""
+    df = client.query_eu(
+        f"SELECT DISTINCT date AS d FROM `{_TABLE}` "
+        f"WHERE date >= '{today - timedelta(days=lookback_days)}' AND profile_views > 0"
+    )
+    return {date.fromisoformat(str(v)[:10]) for v in df["d"]}
 
 
-def refresh_start(today: date, latest: date | None, overlap_days: int = 3,
-                  max_backfill_days: int = 120) -> date:
-    """First day to rebuild: overlap the newest rows already present, so a
-    multi-day outage is backfilled once the source catches up. Bounded so a
-    long-empty table does not trigger an unbounded rebuild."""
+def refresh_start(today: date, present: set[date], overlap_days: int = 3,
+                  window_days: int = 90, max_backfill_days: int = 120) -> date:
+    """First day to rebuild.
+
+    Covers (a) the last few days before the newest present date (late-arriving
+    source data) and (b) the earliest MISSING day inside the 90-day feature
+    window, so gaps are repaired even when newer days already arrived. Bounded
+    so an empty table does not trigger an unbounded rebuild.
+    """
     start = today - timedelta(days=overlap_days)
-    if latest is not None:
+    if present:
+        latest = max(present)
         start = min(start, latest - timedelta(days=overlap_days))
+        window = [latest - timedelta(days=i) for i in range(window_days)]
+        missing = [d for d in window if d not in present]
+        if missing:
+            start = min(start, min(missing))
     return max(start, today - timedelta(days=max_backfill_days))
 
 
-# A day is only replaced when the rebuilt rows are at least this share of the
-# rows already stored for it: a partial source result keeps the previous rows.
+# A day is only replaced when the rebuilt data keeps at least this share of the
+# rows AND of the profile views already stored for it: a partial source result
+# (fewer profiles, or view events missing while impressions remain) keeps the
+# previous rows.
 MIN_REPLACE_RATIO = 0.8
 
 
@@ -103,9 +114,9 @@ def build(start_date: str, end_date: str) -> int:
     Safe to run daily and after outages:
     - the source aggregation is staged first, then DELETE + INSERT run in one
       BigQuery transaction, so a SQL failure leaves the previous rows intact;
-    - a day is replaced only when the staged rows are at least MIN_REPLACE_RATIO
-      of the rows already stored for it (new days are always written), so a
-      partial source result cannot overwrite a complete day.
+    - a day is replaced only when the staged rows and profile views are both at
+      least MIN_REPLACE_RATIO of what is already stored for it (new days are
+      always written), so a partial source result cannot overwrite a complete day.
     Only profile-days with at least one event are written. Returns the number of
     rows in the window after the rebuild.
 
@@ -145,13 +156,16 @@ def build(start_date: str, end_date: str) -> int:
 
         CREATE TEMP TABLE accepted AS
         SELECT s.date
-        FROM (SELECT date, COUNT(*) AS n FROM staged GROUP BY date) AS s
+        FROM (
+            SELECT date, COUNT(*) AS n, SUM(profile_views) AS views FROM staged GROUP BY date
+        ) AS s
         LEFT JOIN (
-            SELECT date, COUNT(*) AS n FROM `{_TABLE}`
+            SELECT date, COUNT(*) AS n, SUM(profile_views) AS views FROM `{_TABLE}`
             WHERE date BETWEEN '{start_date}' AND '{end_date}'
             GROUP BY date
         ) AS e USING (date)
-        WHERE e.n IS NULL OR s.n >= {MIN_REPLACE_RATIO} * e.n;
+        WHERE e.n IS NULL
+           OR (s.n >= {MIN_REPLACE_RATIO} * e.n AND s.views >= {MIN_REPLACE_RATIO} * e.views);
 
         BEGIN TRANSACTION;
         DELETE FROM `{_TABLE}` WHERE date IN (SELECT date FROM accepted);
