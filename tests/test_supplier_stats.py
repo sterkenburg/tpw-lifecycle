@@ -93,3 +93,26 @@ def test_metadata_nulls_are_kept_and_prior_plans_persisted():
     assert out.loc[0, "account_manager"] is None or pd.isna(out.loc[0, "account_manager"])
     assert out.loc[0, "num_paid_plans_before"] == 3
     assert str(out["num_paid_plans_before"].dtype) == "Int64"
+
+
+def test_daily_view_counts_and_site_total():
+    anchor = pd.Timestamp.now().normalize() - pd.Timedelta(days=2)
+    activity = pd.DataFrame([
+        {"profile_id": "1", "event_date": anchor, "views": 5},
+        {"profile_id": "1", "event_date": anchor - pd.Timedelta(days=10), "views": 3},
+        {"profile_id": "1", "event_date": anchor - pd.Timedelta(days=70), "views": 4},
+        {"profile_id": "999", "event_date": anchor - pd.Timedelta(days=1), "views": 12},
+    ])
+    out = supplier_stats.calculate(_suppliers(), activity, EMPTY_LEADS)
+    assert out.loc[0, "profile_views_60d"] == 8
+    assert out.loc[0, "profile_views_60_90d"] == 4
+    assert out.loc[0, "site_views_60d"] == 20          # all profiles, 60-day window
+    assert out.loc[0, "days_since_last_login"] == 0     # relative to the data anchor
+
+
+def test_prior_plans_prefer_derived_history():
+    out = supplier_stats.calculate(
+        _suppliers(prior_paid_plans=5), _daily_views("1", {1: 1}, pd.Timestamp.now().normalize()),
+        EMPTY_LEADS,
+    )
+    assert out.loc[0, "num_paid_plans_before"] == 5

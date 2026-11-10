@@ -1,19 +1,22 @@
-"""Churn scorer: status routing, missing-data handling and behavioural weights."""
+"""Churn scorer: status routing and the fitted model's behaviour on scoring rows."""
 
 import pandas as pd
 import pytest
 
 from signals import churn_scorer
 
+SITE = 180_000.0
+
 
 def _row(**overrides) -> dict:
-    """A healthy, loyal, undecided supplier; tests override what they need."""
+    """A loyal, visible, undecided supplier with recent leads."""
     base = {
         "profile_id": "1",
         "renewal_status": "active",
         "num_paid_plans_before": 8,
         "days_since_last_login": 2,
-        "profile_views_60d": 120,
+        "profile_views_60d": 300,
+        "site_views_60d": SITE,
         "engagement_trend": 0.0,
         "days_since_last_lead": 5,
         "days_until_renewal": 200,
@@ -26,93 +29,74 @@ def _score(**overrides) -> pd.Series:
     return churn_scorer.calculate(pd.DataFrame([_row(**overrides)])).iloc[0]
 
 
-def test_healthy_loyal_supplier_is_low_risk():
+def test_loyal_visible_supplier_is_low_risk():
     r = _score()
-    assert r["churn_probability"] == pytest.approx(0.11 + 2 * 0.0025)
+    assert r["churn_probability"] < churn_scorer._THRESHOLDS["churn_p3"]
     assert r["priority_tier"] == "P4"
-    assert r["risk_factors"] == "Stable"
+
+
+def test_probability_is_a_probability():
+    p = _score(num_paid_plans_before=0, profile_views_60d=0, days_since_last_lead=None)
+    assert 0.0 < p["churn_probability"] < 1.0
 
 
 @pytest.mark.parametrize("status", ["will_churn", "already_renewed", "lapsed"])
 def test_decided_suppliers_get_no_tier(status):
-    r = _score(renewal_status=status, days_since_last_login=None, profile_views_60d=0,
-               num_paid_plans_before=0, days_since_last_lead=None)
+    r = _score(renewal_status=status, num_paid_plans_before=0, profile_views_60d=0)
     assert r["priority_tier"] is None or pd.isna(r["priority_tier"])
-    # The score stays behavioural: a booked status never forces it to 1.0.
-    assert r["churn_probability"] < 1.0
 
 
-def test_status_does_not_change_score():
+def test_status_does_not_change_probability():
     active = _score()["churn_probability"]
     for status in ["will_churn", "already_renewed", "lapsed"]:
         assert _score(renewal_status=status)["churn_probability"] == active
 
 
-def test_lapsed_routes_to_winback():
-    r = _score(renewal_status="lapsed", days_until_renewal=-5)
-    assert r["recommended_action"].startswith("CHURNED")
-    assert "Churned (now on Gratis)" in r["risk_factors"]
-    # The ended-term penalty is for undecided suppliers only.
-    assert "Contract ended" not in r["risk_factors"]
-
-
-def test_will_churn_gets_save_action():
-    r = _score(renewal_status="will_churn")
-    assert r["recommended_action"].startswith("CANCELLATION SCHEDULED")
-
-
-def test_first_term_raises_base_rate():
+def test_risk_moves_in_the_expected_directions():
     loyal = _score()["churn_probability"]
-    first = _score(num_paid_plans_before=0)["churn_probability"]
-    assert first - loyal == pytest.approx(0.40 - 0.11)
-    assert "First paid term" in _score(num_paid_plans_before=0)["risk_factors"]
+    assert _score(num_paid_plans_before=0)["churn_probability"] > loyal
+    assert _score(num_paid_plans_before=2)["churn_probability"] > loyal
+    assert _score(profile_views_60d=5)["churn_probability"] > loyal
+    assert _score(days_since_last_lead=None)["churn_probability"] > loyal
 
 
-def test_missing_plan_history_uses_unknown_base():
-    r = _score(num_paid_plans_before=None)
-    assert r["churn_probability"] == pytest.approx(0.40 + 2 * 0.0025)
-    assert "Unknown plan history" in r["risk_factors"]
+def test_view_share_not_raw_views():
+    # Same share of site traffic, different site volume: same risk.
+    a = _score(profile_views_60d=300, site_views_60d=SITE)["churn_probability"]
+    b = _score(profile_views_60d=150, site_views_60d=SITE / 2)["churn_probability"]
+    assert a == pytest.approx(b)
 
 
-def test_no_view_data_is_capped_not_maxed():
-    r = _score(days_since_last_login=None, profile_views_60d=0)
-    # base 0.11 + no views 0.15 + low views 0.05
-    assert r["churn_probability"] == pytest.approx(0.31)
-    assert "No profile views in 90 days" in r["risk_factors"]
+def test_ended_without_booking_is_p1():
+    r = _score(days_until_renewal=-3)
+    assert r["priority_tier"] == "P1"
+    assert "Contract ended, no renewal booked" in r["risk_factors"]
 
 
-def test_nan_inputs_never_produce_certainty():
-    r = _score(days_since_last_login=float("nan"), engagement_trend=float("nan"),
-               days_since_last_lead=pd.NA, days_until_renewal=float("nan"),
-               num_paid_plans_before=float("nan"))
-    assert 0.0 <= r["churn_probability"] < 0.8
+def test_lapsed_and_will_churn_actions():
+    assert _score(renewal_status="lapsed")["recommended_action"].startswith("CHURNED")
+    assert _score(renewal_status="will_churn")["recommended_action"].startswith(
+        "CANCELLATION SCHEDULED"
+    )
 
 
-def test_plan_value_does_not_affect_score():
+def test_nan_and_missing_inputs_are_safe():
+    r = _score(days_since_last_login=float("nan"), days_since_last_lead=pd.NA,
+               num_paid_plans_before=float("nan"), site_views_60d=float("nan"),
+               days_until_renewal=float("nan"))
+    assert 0.0 < r["churn_probability"] < 1.0
+
+
+def test_plan_value_does_not_affect_probability():
     assert (_score(plan_value=2000.0)["churn_probability"]
             == _score(plan_value=100.0)["churn_probability"])
-
-
-def test_renewal_bump_only_before_plan_end():
-    assert "Renewal within 30 days" in _score(days_until_renewal=10)["risk_factors"]
-    ended = _score(days_until_renewal=-3)
-    assert "Renewal within 30 days" not in ended["risk_factors"]
-    assert "Contract ended, no renewal booked" in ended["risk_factors"]
-    assert ended["churn_probability"] == pytest.approx(0.11 + 2 * 0.0025 + 0.15)
-
-
-def test_trend_penalties():
-    flat = _score()["churn_probability"]
-    assert _score(engagement_trend=-0.6)["churn_probability"] - flat == pytest.approx(0.08)
-    assert _score(engagement_trend=-0.3)["churn_probability"] - flat == pytest.approx(0.03)
 
 
 def test_nullable_int_columns_from_pipeline():
     df = pd.DataFrame([_row(), _row(profile_id="2")])
     df["days_since_last_login"] = pd.array([None, 4], dtype="Int64")
-    df["days_since_last_lead"] = pd.array([None, None], dtype="Int64")
+    df["days_since_last_lead"] = pd.array([None, 3], dtype="Int64")
     df["num_paid_plans_before"] = pd.array([None, 3], dtype="Int64")
     out = churn_scorer.calculate(df)
-    # unknown history 0.40 + no views 0.15 + no leads 0.05; 3 prior plans 0.19 + 4d*0.0025 + 0.05
-    assert list(out["churn_probability"]) == pytest.approx([0.60, 0.25])
-    assert list(out["priority_tier"]) == [churn_scorer._tier(0.60), churn_scorer._tier(0.25)]
+    assert out["churn_probability"].between(0, 1).all()
+    assert out.loc[0, "churn_probability"] > out.loc[1, "churn_probability"]

@@ -139,7 +139,7 @@ export default async function SupplierPage({
       <div className="grid md:grid-cols-2 gap-6">
         <div className="bg-white rounded-xl border border-gray-200 p-6">
           <h2 className="text-sm font-semibold text-gray-900 mb-4">
-            Risk Score
+            Churn Risk
           </h2>
           <div className="flex items-center gap-4">
             <div className="relative w-24 h-24">
@@ -172,7 +172,7 @@ export default async function SupplierPage({
               </svg>
               <div className="absolute inset-0 flex items-center justify-center">
                 <span className="text-lg font-bold text-gray-900">
-                  {riskScore}
+                  {riskScore}%
                 </span>
               </div>
             </div>
@@ -187,7 +187,7 @@ export default async function SupplierPage({
                 {supplier.recommended_action}
               </p>
               <p className="text-xs text-gray-400 mt-2">
-                Relative risk score out of 100, not a probability.
+                Estimated chance of not renewing this term (churn model).
                 {tier ? "" : " No tier: the renewal outcome is already booked."}
               </p>
             </div>

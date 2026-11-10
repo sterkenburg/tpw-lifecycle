@@ -30,12 +30,44 @@ import yaml
 
 from actions import crm, emails, flows, slack
 from analytics import outcomes, projected_value, supplier_stats
-from data import activity, client, leads, suppliers
+from data import activity, client, exposure, leads, suppliers
 from signals import churn_scorer, cohort, engagement
+
+# The GA4 view source normally lags ~2 days. Beyond this, the view inputs would
+# describe a past period while the snapshot is dated today: stop before writing
+# so the dashboard keeps the last good snapshot and the failed run is visible.
+MAX_VIEW_DATA_AGE_DAYS = 5
+VIEW_WINDOW_DAYS = 90   # activity.get_views_last_90d window; every day must have data
 
 _CONFIG_PATH = Path(__file__).parent.parent / "config" / "settings.yaml"
 with open(_CONFIG_PATH) as _f:
     _LEGACY_ON = yaml.safe_load(_f).get("legacy_actions", {}).get("enabled", False)
+
+
+def check_view_freshness(df_activity: pd.DataFrame, today: date) -> pd.Timestamp:
+    """Latest view date in the feed; raise if it is too old or has missing days.
+
+    The feed covers every profile, so each day of the 90-day window normally has
+    thousands of rows; a day without any row is a gap in the rollup.
+    """
+    latest = df_activity["event_date"].max() if not df_activity.empty else pd.NaT
+    age = (pd.Timestamp(today) - latest).days if pd.notna(latest) else None
+    if age is None or age > MAX_VIEW_DATA_AGE_DAYS:
+        raise RuntimeError(
+            f"Profile-view data is stale (latest {latest}, age {age} days, "
+            f"limit {MAX_VIEW_DATA_AGE_DAYS}). Not publishing a snapshot; check the GA4 "
+            "monthly_profile_stats source and the exposure refresh."
+        )
+    expected = pd.date_range(latest - pd.Timedelta(days=VIEW_WINDOW_DAYS - 1), latest, freq="D")
+    present = set(pd.to_datetime(df_activity["event_date"]).dt.normalize())
+    missing = [d.date() for d in expected if d not in present]
+    if missing:
+        raise RuntimeError(
+            f"Profile-view data has {len(missing)} missing day(s) in the "
+            f"{VIEW_WINDOW_DAYS}-day window (first: {missing[0]}). Not publishing; "
+            "backfill with jobs/build_exposure_daily.py <start> <end>."
+        )
+    return latest
 
 
 def run():
@@ -47,13 +79,27 @@ def run():
     # 1. Load data
     # ------------------------------------------------------------------
     print("[1/7] Loading data...")
+    # Refresh the profile-view rollup first. The window covers the last days
+    # before the newest present date (the GA4 source lags ~2 days) and any
+    # missing day in the 90-day feature window, so outage gaps are rebuilt once
+    # the source has them. Atomic (one
+    # transaction): a failure leaves the previous rows intact, and the check
+    # below decides whether the feed is complete and recent enough to publish.
+    try:
+        start = exposure.refresh_start(date.today(), exposure.present_dates(date.today()))
+        refreshed = exposure.build(start.isoformat(), date.today().isoformat())
+        print(f"        Exposure rollup refreshed from {start}: {refreshed:,} rows")
+    except Exception as e:
+        print(f"        Exposure refresh failed (non-fatal): {e}")
     df_suppliers = suppliers.get_current()
-    df_activity = activity.get_last_90d()
+    df_activity = activity.get_views_last_90d()
     df_leads = leads.get_last_90d()
-    df_contract_activity = activity.get_contract_period_views(df_suppliers)
+    df_contract_activity = activity.get_contract_views(df_suppliers)
     df_contract_leads = leads.get_contract_period_leads(df_suppliers)
     print(f"        Suppliers: {len(df_suppliers)}")
-    print(f"        Activity events: {len(df_activity)}")
+    latest_view_date = check_view_freshness(df_activity, date.today())
+    print(f"        View rows (supplier-days): {len(df_activity)}, "
+          f"latest data date: {latest_view_date.date()}")
     print(f"        Leads: {len(df_leads)}")
     print(f"        Contract views: {len(df_contract_activity)}")
     print(f"        Contract leads: {len(df_contract_leads)}")

@@ -30,42 +30,34 @@ def calculate(
     today = pd.Timestamp.now().normalize()
     df = suppliers.copy()
 
-    # --- GA4 activity (last 60d) ---
-    activity_60d = activity[activity["event_date"] >= today - pd.Timedelta(days=60)]
-    views_60d = (
-        activity_60d.groupby("profile_id")
-        .size()
-        .rename("profile_views_60d")
-    )
-
-    # GA4 activity (previous 60-90d) for trend
-    activity_60_90d = activity[
-        (activity["event_date"] >= today - pd.Timedelta(days=90))
-        & (activity["event_date"] < today - pd.Timedelta(days=60))
-    ]
-    views_60_90d = (
-        activity_60_90d.groupby("profile_id")
-        .size()
-        .rename("profile_views_60_90d")
-    )
-
-    # --- Equal-window engagement trend (anchored on the latest activity date) ---
+    # --- Profile views ---
+    # `activity` is either one row per view event (legacy pageview feed) or one
+    # row per supplier-day with a `views` count (exposure rollup). All view
+    # windows end on the latest date in the feed: the GA4 export lags the job by
+    # ~2 days, and "today"-anchored windows would read as a decline for everyone.
     anchor = activity["event_date"].max() if not activity.empty else today
     if pd.isna(anchor):
         anchor = today
-    window = pd.Timedelta(days=TREND_WINDOW_DAYS)
-    double_window = pd.Timedelta(days=2 * TREND_WINDOW_DAYS)
-    views_recent = (
-        activity[activity["event_date"] > anchor - window]
-        .groupby("profile_id").size().rename("_views_recent")
-    )
-    views_prior = (
-        activity[
-            (activity["event_date"] > anchor - double_window)
-            & (activity["event_date"] <= anchor - window)
+
+    def _views_between(after_days: int, until_days: int, name: str) -> pd.Series:
+        """Views with anchor - after_days < event_date <= anchor - until_days."""
+        rows = activity[
+            (activity["event_date"] > anchor - pd.Timedelta(days=after_days))
+            & (activity["event_date"] <= anchor - pd.Timedelta(days=until_days))
         ]
-        .groupby("profile_id").size().rename("_views_prior")
-    )
+        grouped = rows.groupby("profile_id")
+        counts = grouped["views"].sum() if "views" in rows.columns else grouped.size()
+        return counts.rename(name)
+
+    views_60d = _views_between(60, 0, "profile_views_60d")
+    views_60_90d = _views_between(90, 60, "profile_views_60_90d")
+    # Equal-window engagement trend: last 30 days vs the 30 days before.
+    views_recent = _views_between(TREND_WINDOW_DAYS, 0, "_views_recent")
+    views_prior = _views_between(2 * TREND_WINDOW_DAYS, TREND_WINDOW_DAYS, "_views_prior")
+    # All profiles' views in the same 60 days (the activity feed covers every
+    # profile, not only paying suppliers): the churn model uses each supplier's
+    # SHARE of site views, which is robust to seasonality and site-wide shifts.
+    site_views_60d = float(views_60d.sum())
 
     # --- Leads (last 60d) ---
     # Lead rows are pre-aggregated per supplier/day/type (leads.get_last_90d), so
@@ -149,21 +141,28 @@ def calculate(
     # historical name (days_since_last_login) for schema compatibility, but GA4
     # has no supplier-login signal: this measures couple demand, not supplier
     # engagement. NULL when the profile had no views in the 90-day window.
+    viewed = activity[activity["views"] > 0] if "views" in activity.columns else activity
     last_view = (
-        activity.groupby("profile_id")["event_date"]
+        viewed.groupby("profile_id")["event_date"]
         .max()
         .rename("last_activity_date")
     )
     df = df.set_index("profile_id").join(last_view, how="left").reset_index()
+    # Relative to the data anchor (0 = viewed on the latest day with data).
     df["days_since_last_login"] = (
-        (today - pd.to_datetime(df["last_activity_date"], errors="coerce")).dt.days.astype("Int64")
+        (anchor - pd.to_datetime(df["last_activity_date"], errors="coerce")).dt.days.astype("Int64")
     )
 
-    # Paid plans before the current one (loyalty). NULL when the source lacks it.
-    if "num_paid_plans_before" in df.columns:
+    # Paid plans before the current one (loyalty). Prefer the count derived from
+    # the plan history (suppliers.get_current: prior_paid_plans), which is what
+    # the churn model was trained on; fall back to the source column.
+    source_col = "prior_paid_plans" if "prior_paid_plans" in df.columns else "num_paid_plans_before"
+    if source_col in df.columns:
         df["num_paid_plans_before"] = (
-            pd.to_numeric(df["num_paid_plans_before"], errors="coerce").round().astype("Int64")
+            pd.to_numeric(df[source_col], errors="coerce").round().astype("Int64")
         )
+
+    df["site_views_60d"] = site_views_60d
 
     # Meta
     df["stats_date"] = today
@@ -194,6 +193,7 @@ def calculate(
         "category_avg_leads_60d",
         "renewal_status",
         "num_paid_plans_before",
+        "site_views_60d",
         "stats_date",
     ]
     return df[[c for c in cols if c in df.columns]]
