@@ -74,7 +74,12 @@ def get_current() -> pd.DataFrame:
         -- population the at-risk system most needs to see (doc 29 §2.3 note).
         SELECT
             *,
-            ROW_NUMBER() OVER (PARTITION BY profile_id ORDER BY plan_end DESC) AS rn_end
+            ROW_NUMBER() OVER (PARTITION BY profile_id ORDER BY plan_end DESC) AS rn_end,
+            -- Paid plans before this one, derived from the plan history (the
+            -- churn model's loyalty input; the source num_paid_plans_before
+            -- column disagrees with the history for about a third of terms).
+            ROW_NUMBER() OVER (PARTITION BY profile_id ORDER BY plan_start, plan_end) - 1
+                AS prior_paid_plans
         FROM `{_BUSINESS_TABLE}`
         WHERE profile_id IS NOT NULL
           AND plan_name != 'Gratis'
@@ -121,6 +126,7 @@ def get_current() -> pd.DataFrame:
         b.business_status,
         b.account_manager,
         b.num_paid_plans_before,
+        b.prior_paid_plans,
         b.next_plan_comparison,
         b.converted_lead,
         p.profile_telephone AS phone,

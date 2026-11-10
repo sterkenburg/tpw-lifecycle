@@ -20,7 +20,7 @@ experiment (both arms) via cohort.enrolled_ids().
 
 import sys
 from collections import Counter
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -30,7 +30,7 @@ import yaml
 
 from actions import crm, emails, flows, slack
 from analytics import outcomes, projected_value, supplier_stats
-from data import activity, client, leads, suppliers
+from data import activity, client, exposure, leads, suppliers
 from signals import churn_scorer, cohort, engagement
 
 _CONFIG_PATH = Path(__file__).parent.parent / "config" / "settings.yaml"
@@ -47,13 +47,24 @@ def run():
     # 1. Load data
     # ------------------------------------------------------------------
     print("[1/7] Loading data...")
+    # Refresh the profile-view rollup first (idempotent, last 3 days; the GA4
+    # source lags ~2 days). Best-effort: on failure the features use the rollup
+    # as it stands.
+    try:
+        refreshed = exposure.build(
+            (date.today() - timedelta(days=3)).isoformat(), date.today().isoformat()
+        )
+        print(f"        Exposure rollup refreshed: {refreshed:,} rows")
+    except Exception as e:
+        print(f"        Exposure refresh failed (non-fatal): {e}")
     df_suppliers = suppliers.get_current()
-    df_activity = activity.get_last_90d()
+    df_activity = activity.get_views_last_90d()
     df_leads = leads.get_last_90d()
-    df_contract_activity = activity.get_contract_period_views(df_suppliers)
+    df_contract_activity = activity.get_contract_views(df_suppliers)
     df_contract_leads = leads.get_contract_period_leads(df_suppliers)
     print(f"        Suppliers: {len(df_suppliers)}")
-    print(f"        Activity events: {len(df_activity)}")
+    print(f"        View rows (supplier-days): {len(df_activity)}, "
+          f"latest data date: {df_activity['event_date'].max()}")
     print(f"        Leads: {len(df_leads)}")
     print(f"        Contract views: {len(df_contract_activity)}")
     print(f"        Contract leads: {len(df_contract_leads)}")

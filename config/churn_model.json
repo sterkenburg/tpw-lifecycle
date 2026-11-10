@@ -1,0 +1,37 @@
+{
+  "model": "logistic_regression",
+  "version": "2026-11-10",
+  "target": "P(paid term not renewed within 45 days of plan_end)",
+  "horizon": "inputs measured 60 days before plan_end",
+  "features": [
+    "log_prior_plans",
+    "first_term",
+    "log_view_share",
+    "no_leads_90d"
+  ],
+  "intercept": 0.938503,
+  "coefficients": {
+    "log_prior_plans": -0.738316,
+    "first_term": -0.251341,
+    "log_view_share": -0.399687,
+    "no_leads_90d": 0.106751
+  },
+  "training": {
+    "version": "2026-11-10",
+    "rows": 1914,
+    "plan_end_range": [
+      "2025-06-01",
+      "2026-09-25"
+    ],
+    "non_renewal_rate": 0.2241,
+    "l2": 1.0,
+    "validation": {
+      "train_plan_end_until": "2026-03-25",
+      "test_rows": 679,
+      "test_auc": 0.6883,
+      "prior_only_auc": 0.6603,
+      "test_mean_predicted": 0.2306,
+      "test_actual_rate": 0.2297
+    }
+  }
+}
