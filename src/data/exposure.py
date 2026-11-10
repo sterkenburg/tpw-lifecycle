@@ -81,13 +81,15 @@ def present_dates(today: date, lookback_days: int = 120) -> set[date]:
     return {date.fromisoformat(str(v)[:10]) for v in df["d"]}
 
 
-def refresh_start(today: date, present: set[date], overlap_days: int = 3,
+def refresh_start(today: date, present: set[date], overlap_days: int = 5,
                   window_days: int = 90, max_backfill_days: int = 120) -> date:
     """First day to rebuild.
 
-    Covers (a) the last few days before the newest present date (late-arriving
-    source data) and (b) the earliest MISSING day inside the 90-day feature
-    window, so gaps are repaired even when newer days already arrived. Bounded
+    Covers (a) the 5 days before the newest present date: GA4 can still update
+    a day for up to 72 hours, so each day is rebuilt several times after it
+    first appears (a day that first lands partially is completed later), and
+    (b) the earliest MISSING day inside the 90-day feature window, so gaps are
+    repaired even when newer days already arrived. Bounded
     so an empty table does not trigger an unbounded rebuild.
     """
     start = today - timedelta(days=overlap_days)

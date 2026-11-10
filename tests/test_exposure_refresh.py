@@ -26,12 +26,12 @@ def _days(end: date, n: int, skip: set[date] = frozenset()) -> set[date]:
 
 def test_normal_day_rebuilds_last_days(exposure):
     present = _days(date(2026, 11, 8), 120)
-    assert exposure.refresh_start(date(2026, 11, 10), present) == date(2026, 11, 5)
+    assert exposure.refresh_start(date(2026, 11, 10), present) == date(2026, 11, 3)
 
 
 def test_outage_is_backfilled_from_newest_present_day(exposure):
     present = _days(date(2026, 11, 1), 120)
-    assert exposure.refresh_start(date(2026, 11, 10), present) == date(2026, 10, 29)
+    assert exposure.refresh_start(date(2026, 11, 10), present) == date(2026, 10, 27)
 
 
 def test_older_gap_is_repaired_after_newer_days_arrive(exposure):
@@ -41,4 +41,4 @@ def test_older_gap_is_repaired_after_newer_days_arrive(exposure):
 
 def test_backfill_is_bounded(exposure):
     assert exposure.refresh_start(date(2026, 11, 10), {date(2025, 1, 1)}) == date(2026, 7, 13)
-    assert exposure.refresh_start(date(2026, 11, 10), set()) == date(2026, 11, 7)
+    assert exposure.refresh_start(date(2026, 11, 10), set()) == date(2026, 11, 5)
