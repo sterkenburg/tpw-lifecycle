@@ -92,13 +92,22 @@ def refresh_start(today: date, latest: date | None, overlap_days: int = 3,
     return max(start, today - timedelta(days=max_backfill_days))
 
 
+# A day is only replaced when the rebuilt rows are at least this share of the
+# rows already stored for it: a partial source result keeps the previous rows.
+MIN_REPLACE_RATIO = 0.8
+
+
 def build(start_date: str, end_date: str) -> int:
     """(Re)build supplier_exposure_daily for the inclusive [start_date, end_date].
 
-    Idempotent and atomic: the DELETE and INSERT run in one BigQuery transaction,
-    so a failure leaves the previous rows intact (no gap in the shared rollup).
-    Only profile-days with at least one event are written (the source skeleton is
-    mostly empty). Returns the number of rows in the window after the rebuild.
+    Safe to run daily and after outages:
+    - the source aggregation is staged first, then DELETE + INSERT run in one
+      BigQuery transaction, so a SQL failure leaves the previous rows intact;
+    - a day is replaced only when the staged rows are at least MIN_REPLACE_RATIO
+      of the rows already stored for it (new days are always written), so a
+      partial source result cannot overwrite a complete day.
+    Only profile-days with at least one event are written. Returns the number of
+    rows in the window after the rebuild.
 
     Args:
         start_date / end_date: 'YYYY-MM-DD'.
@@ -109,9 +118,7 @@ def build(start_date: str, end_date: str) -> int:
 
     client.execute(
         f"""
-        BEGIN TRANSACTION;
-        DELETE FROM `{_TABLE}` WHERE date BETWEEN '{start_date}' AND '{end_date}';
-        INSERT INTO `{_TABLE}` ({_COLUMNS})
+        CREATE TEMP TABLE staged AS
         SELECT
             profile_id, date, profile_views, impressions, list_clicks, show_phone,
             website_open, wishlist, purchase, profile_total_time,
@@ -135,6 +142,21 @@ def build(start_date: str, end_date: str) -> int:
         )
         WHERE profile_views > 0 OR impressions > 0 OR list_clicks > 0 OR show_phone > 0
            OR website_open > 0 OR wishlist > 0 OR purchase > 0;
+
+        CREATE TEMP TABLE accepted AS
+        SELECT s.date
+        FROM (SELECT date, COUNT(*) AS n FROM staged GROUP BY date) AS s
+        LEFT JOIN (
+            SELECT date, COUNT(*) AS n FROM `{_TABLE}`
+            WHERE date BETWEEN '{start_date}' AND '{end_date}'
+            GROUP BY date
+        ) AS e USING (date)
+        WHERE e.n IS NULL OR s.n >= {MIN_REPLACE_RATIO} * e.n;
+
+        BEGIN TRANSACTION;
+        DELETE FROM `{_TABLE}` WHERE date IN (SELECT date FROM accepted);
+        INSERT INTO `{_TABLE}` ({_COLUMNS})
+        SELECT {_COLUMNS} FROM staged WHERE date IN (SELECT date FROM accepted);
         COMMIT TRANSACTION;
         """
     )
