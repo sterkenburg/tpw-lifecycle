@@ -69,12 +69,12 @@ tables:
 thresholds:
   # Tiers apply ONLY to undecided suppliers (renewal_status = active). Scheduled
   # cancellations (will_churn), renewed and churned suppliers get no tier.
-  # Cutoffs on the fitted model's probability of NOT renewing (calibrated at
-  # 60 days before plan end; config/churn_model.json). 2026-11-10: P1 48,
-  # P2 161, P3 360, P4 695 of 1,264 undecided suppliers.
-  churn_p1: 0.50               # urgent: call
-  churn_p2: 0.35               # high: email + monitor
-  churn_p3: 0.20               # medium: nurture
+  # Cutoffs on the fitted model's probability that an UNDECIDED supplier does not
+  # renew this term (calibrated to that population; config/churn_model.json).
+  # 2026-11-10: P1 32, P2 140, P3 311, P4 781 of 1,264 undecided suppliers.
+  churn_p1: 0.25               # urgent: call
+  churn_p2: 0.15               # high: email + monitor
+  churn_p3: 0.08               # medium: nurture
   no_lead_days: 45             # trigger re-engagement
   renewal_days: 60             # trigger renewal prep
   engagement_decline: -0.5     # 50% drop vs previous month
@@ -83,6 +83,47 @@ thresholds:
 # (src/signals/churn_model.py). Refit quarterly with jobs/fit_churn_model.py and
 # review the printed validation in a PR before merging the new model file.
 
+# API keys (use env vars in production)
+# sendgrid_api_key: "${SENDGRID_API_KEY}"
+# slack_webhook_url: "${SLACK_WEBHOOK_URL}"
+# messagebird_api_key: "${MESSAGEBIRD_API_KEY}"
+# crm_api_key: "${CRM_API_KEY}"
+
+# Email settings
+email:
+  from_name: "ThePerfectWedding"
+  from_address: "partners@theperfectwedding.nl"
+  monthly_send_day: 1          # 1st of month
+  monthly_send_hour: 9
+  # Master safety switch. When true (default), the pipeline computes and logs
+  # which emails *would* be sent but does not call SendGrid. Set the env var
+  # EMAIL_DRY_RUN=false (and provide SENDGRID_API_KEY) to send for real.
+  dry_run: true
+  # Minimum days between two sends of the same flow to one supplier (dedup).
+  dedup_days:
+    monthly_results: 25
+    re_engagement: 14
+    renewal_prep: 21
+
+# Directive emitters (WS-D). The platform COMPUTES directives for the treatment
+# arm regardless; these flags control whether a channel actually DISPATCHES.
+# Flip a channel ON only after its G0 confirmation spike proves the integration —
+# until then its directives are written with status='gated' (pending the spike).
+directives:
+  elastic_enabled: false      # boost  → Elastic; gated on YOO-228 (Elastic owner)
+  bird_enabled: false         # newsletter + email → Bird/marketing_flow; gated on Bird spike
+  scraper_enabled: false      # optimize → profile_auto_complete; gated on scraper spike
+  onboarding_enabled: false   # onboarding → Bird/marketing_flow; first-term cohort (doc 28)
+  winback_enabled: false      # winback → Bird/marketing_flow; lapsed-supplier cohort (doc 28)
+  # Even when a channel is enabled, dry_run logs the dispatch instead of sending.
+  dry_run: true
+  # Exposure redistribution operates in the FREE/owned layer only — never the
+  # paid premium inventory (paid-product guardrail, docs/strategy/18 Lever 1).
+  boost_layer: "free"
+
+# Legacy pre-holdout emitters in the 7AM daily pipeline (P1 CRM tasks + the
+# deprecated SendGrid email flows). OFF: the pipeline still computes stats and
+# signals and posts the aggregate Slack summary, but emits NO per-supplier
 # actions — dispatch is owned by the directives system (WS-D), which enforces
 # the holdout structurally. These flows predate the holdout and were logging
 # crm_task intents for stage1 CONTROL suppliers (doc 29 §5). If temporarily

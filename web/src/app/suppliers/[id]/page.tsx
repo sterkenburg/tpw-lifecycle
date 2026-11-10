@@ -187,7 +187,7 @@ export default async function SupplierPage({
                 {supplier.recommended_action}
               </p>
               <p className="text-xs text-gray-400 mt-2">
-                Chance of not renewing this term, from the churn model.
+                Estimated chance of not renewing this term (churn model).
                 {tier ? "" : " No tier: the renewal outcome is already booked."}
               </p>
             </div>

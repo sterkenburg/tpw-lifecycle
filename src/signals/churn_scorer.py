@@ -6,10 +6,12 @@ Two separate things, kept separate:
   scheduled, already_renewed = paid renewal booked, lapsed = already on Gratis).
   It decides which queue a supplier belongs in, not how risky they are.
 - churn_probability is the fitted churn model's probability that the supplier
-  does not renew (signals/churn_model.py, config/churn_model.json): a logistic
-  regression on past renewal decisions using loyalty (prior paid plans), share
-  of site-wide profile views and lead recency, measured 60 days before plan end.
-  It is calibrated at that horizon; read it as "x% chance of not renewing".
+  does not renew this term (signals/churn_model.py, config/churn_model.json): a
+  logistic regression on past renewal decisions using loyalty (prior paid
+  plans), share of site-wide profile views and lead recency, measured 60 days
+  before plan end, then shifted to match suppliers still UNDECIDED at that
+  point. It is an estimate for the tiered population; the shift rests on a
+  small sample (see the model file) and is re-estimated at each refit.
 
 priority_tier (P1-P4) is assigned only to undecided suppliers
 (renewal_status == 'active'), from probability cutoffs in config/settings.yaml

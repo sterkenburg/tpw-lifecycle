@@ -33,9 +33,27 @@ from analytics import outcomes, projected_value, supplier_stats
 from data import activity, client, exposure, leads, suppliers
 from signals import churn_scorer, cohort, engagement
 
+# The GA4 view source normally lags ~2 days. Beyond this, the view inputs would
+# describe a past period while the snapshot is dated today: stop before writing
+# so the dashboard keeps the last good snapshot and the failed run is visible.
+MAX_VIEW_DATA_AGE_DAYS = 5
+
 _CONFIG_PATH = Path(__file__).parent.parent / "config" / "settings.yaml"
 with open(_CONFIG_PATH) as _f:
     _LEGACY_ON = yaml.safe_load(_f).get("legacy_actions", {}).get("enabled", False)
+
+
+def check_view_freshness(df_activity: pd.DataFrame, today: date) -> pd.Timestamp:
+    """Latest view date in the feed; raise if missing or older than the limit."""
+    latest = df_activity["event_date"].max() if not df_activity.empty else pd.NaT
+    age = (pd.Timestamp(today) - latest).days if pd.notna(latest) else None
+    if age is None or age > MAX_VIEW_DATA_AGE_DAYS:
+        raise RuntimeError(
+            f"Profile-view data is stale (latest {latest}, age {age} days, "
+            f"limit {MAX_VIEW_DATA_AGE_DAYS}). Not publishing a snapshot; check the GA4 "
+            "monthly_profile_stats source and the exposure refresh."
+        )
+    return latest
 
 
 def run():
@@ -47,9 +65,9 @@ def run():
     # 1. Load data
     # ------------------------------------------------------------------
     print("[1/7] Loading data...")
-    # Refresh the profile-view rollup first (idempotent, last 3 days; the GA4
-    # source lags ~2 days). Best-effort: on failure the features use the rollup
-    # as it stands.
+    # Refresh the profile-view rollup first (last 3 days; the GA4 source lags ~2
+    # days). Atomic (one transaction), so a failure leaves the previous rows
+    # intact; the freshness check below decides whether they are recent enough.
     try:
         refreshed = exposure.build(
             (date.today() - timedelta(days=3)).isoformat(), date.today().isoformat()
@@ -63,8 +81,9 @@ def run():
     df_contract_activity = activity.get_contract_views(df_suppliers)
     df_contract_leads = leads.get_contract_period_leads(df_suppliers)
     print(f"        Suppliers: {len(df_suppliers)}")
+    latest_view_date = check_view_freshness(df_activity, date.today())
     print(f"        View rows (supplier-days): {len(df_activity)}, "
-          f"latest data date: {df_activity['event_date'].max()}")
+          f"latest data date: {latest_view_date.date()}")
     print(f"        Leads: {len(df_leads)}")
     print(f"        Contract views: {len(df_contract_activity)}")
     print(f"        Contract leads: {len(df_contract_leads)}")

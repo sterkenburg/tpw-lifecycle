@@ -11,13 +11,22 @@ Short terms are excluded: their plan_end is rewritten when a term is cut short,
 so their labels and timing are unreliable.
 
 Validation: fit on terms ending before the last VALIDATION_MONTHS months, score
-those held-out months, compare with a prior-plans-only baseline. The shipped
-model is then refitted on all rows. Review the printed report and the JSON diff
-in a PR before merging; nothing changes in production until then.
+those held-out months, compare with a prior-plans-only baseline (bootstrap CI).
+The shipped model is then refitted on all rows.
+
+Calibration for the tiered population: terms whose daily snapshot (from
+supplier_stats_daily, available since 2026-05-22) showed the supplier undecided
+(renewal_status = active) about 60 days before plan_end churn far less than all
+terms, because most churners have already booked Gratis by then. The intercept
+shift that matches the final model's mean prediction to their observed rate is
+stored as `undecided_intercept_shift`. It is estimated in-sample on a small set;
+the report prints its bootstrap CI. Review the report and the JSON diff in a PR
+before merging; nothing changes in production until then.
 
 CSV inputs (--csv-dir): terms.csv (profile_id, plan_start, plan_end, plan_value,
 category, derived_prior, renewed), views.csv (profile_id, date, profile_views),
-leads.csv (profile_id, event_date, n), site.csv (date, site_views).
+leads.csv (profile_id, event_date, n), site.csv (date, site_views),
+statuses.csv (profile_id, stats_date, renewal_status).
 """
 
 import argparse
@@ -34,14 +43,16 @@ from signals import churn_model
 
 HORIZON_DAYS = 60
 RENEWAL_GRACE_DAYS = 45
-EXPOSURE_START = pd.Timestamp("2025-01-01")
+EXPOSURE_START = pd.Timestamp("2025-02-19")   # first day with data in the rollup
 VALIDATION_MONTHS = 6
 L2 = 1.0
+MIN_UNDECIDED_CHURNERS = 10   # below this, no shift is estimated (kept at 0)
+BOOTSTRAPS = 1000
 
 
 # --- Data ----------------------------------------------------------------------
 
-def _load_bigquery() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def _load_bigquery() -> tuple[pd.DataFrame, ...]:
     from data import client, suppliers
 
     first_end = (EXPOSURE_START + pd.Timedelta(days=90 + HORIZON_DAYS)).date()
@@ -87,17 +98,37 @@ def _load_bigquery() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataF
     WHERE event_date >= '{EXPOSURE_START.date()}' AND CAST(profile_id AS STRING) IN ({ids})
     GROUP BY 1, 2
     """)
-    return terms, views, leads, site
+    statuses = client.query(f"""
+    SELECT profile_id, stats_date, renewal_status
+    FROM `{client.PROJECT_ID}.{client.DATASET}.supplier_stats_daily`
+    WHERE profile_id IN ({ids})
+    """)
+    return terms, views, leads, site, statuses
 
 
-def _load_csv(directory: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def _load_csv(directory: str) -> tuple[pd.DataFrame, ...]:
     d = Path(directory)
     return (
         pd.read_csv(d / "terms.csv", dtype={"profile_id": str}),
         pd.read_csv(d / "views.csv", dtype={"profile_id": str}),
         pd.read_csv(d / "leads.csv", dtype={"profile_id": str}),
         pd.read_csv(d / "site.csv"),
+        pd.read_csv(d / "statuses.csv", dtype={"profile_id": str}),
     )
+
+
+def undecided_at_horizon(df: pd.DataFrame, statuses: pd.DataFrame) -> pd.Series:
+    """True where the snapshot nearest T (50-70 days before plan_end) was 'active'."""
+    st = statuses.assign(
+        profile_id=statuses["profile_id"].astype(str),
+        stats_date=pd.to_datetime(statuses["stats_date"]),
+    )
+    m = df[["profile_id", "plan_end"]].reset_index().merge(st, on="profile_id")
+    m["lead_days"] = (m["plan_end"] - m["stats_date"]).dt.days
+    m = m[m["lead_days"].between(50, 70)]
+    m["dist"] = (m["lead_days"] - HORIZON_DAYS).abs()
+    nearest = m.sort_values("dist").drop_duplicates("index").set_index("index")["renewal_status"]
+    return nearest.reindex(df.index).fillna("unknown").eq("active")
 
 
 def training_frame(terms, views, leads, site) -> pd.DataFrame:
@@ -167,7 +198,8 @@ def main() -> None:
     args = ap.parse_args()
 
     raw = _load_csv(args.csv_dir) if args.csv_dir else _load_bigquery()
-    df = training_frame(*raw)
+    df = training_frame(*raw[:4])
+    undecided = undecided_at_horizon(df, raw[4])
     x, y = churn_model.features(df), df["churn"]
     cutoff = df["plan_end"].max() - pd.DateOffset(months=VALIDATION_MONTHS)
     train, test = df["plan_end"] <= cutoff, df["plan_end"] > cutoff
@@ -181,9 +213,22 @@ def main() -> None:
     model = {"intercept": b0, "coefficients": coef}
     p = churn_model.predict(df[test], model).to_numpy()
     prior_only = -df.loc[test, "prior_paid_plans"].to_numpy(dtype=float)
-    test_auc, base_auc = auc(y[test].to_numpy(), p), auc(y[test].to_numpy(), prior_only)
-    print(f"  held-out AUC {test_auc:.3f} (prior-plans-only baseline {base_auc:.3f}); "
-          f"mean predicted {p.mean():.1%} vs actual {y[test].mean():.1%}")
+    yt = y[test].to_numpy()
+    test_auc, base_auc = auc(yt, p), auc(yt, prior_only)
+    rng = np.random.default_rng(0)
+    gains = []
+    for _ in range(BOOTSTRAPS):
+        i = rng.integers(0, len(yt), len(yt))
+        if 0 < yt[i].sum() < len(i):
+            gains.append(auc(yt[i], p[i]) - auc(yt[i], prior_only[i]))
+    lo, hi = np.percentile(gains, [2.5, 97.5])
+    print(f"  held-out AUC {test_auc:.3f} vs prior-plans-only {base_auc:.3f} "
+          f"(gain 95% CI {lo:+.3f} .. {hi:+.3f}); "
+          f"mean predicted {p.mean():.1%} vs actual {y[test].mean():.1%} (all terms)")
+    und_test = undecided[test].to_numpy()
+    if und_test.sum() and 0 < yt[und_test].sum() < und_test.sum():
+        print(f"  held-out undecided-at-T subset: n={und_test.sum()}, churned "
+              f"{int(yt[und_test].sum())}, AUC {auc(yt[und_test], p[und_test]):.3f}")
     quint = pd.qcut(pd.Series(p), 5, labels=False, duplicates="drop")
     calib = pd.DataFrame({"pred": p, "actual": y[test].to_numpy()}).groupby(quint.to_numpy()).mean()
     print("  calibration by quintile:\n" + calib.round(3).T.to_string())
@@ -191,10 +236,30 @@ def main() -> None:
     b0_all, coef_all = churn_model.fit(x, y, l2=L2)
     print(f"Final model (all {len(df)} rows): intercept {b0_all:.3f}, "
           + ", ".join(f"{k} {v:+.3f}" for k, v in coef_all.items()))
+
+    # Calibration shift for the undecided (tiered) population.
+    final = {"intercept": b0_all, "coefficients": coef_all}
+    y_und = y[undecided].to_numpy()
+    shift, shift_ci = 0.0, [None, None]
+    if y_und.sum() >= MIN_UNDECIDED_CHURNERS:
+        p_und = churn_model.predict(df[undecided], final).to_numpy()
+        logits = np.log(p_und / (1 - p_und))
+        shift = churn_model.intercept_shift(logits, float(y_und.mean()))
+        boots = []
+        for _ in range(BOOTSTRAPS):
+            i = rng.integers(0, len(y_und), len(y_und))
+            boots.append(churn_model.intercept_shift(logits[i], float(y_und[i].mean())))
+        shift_ci = [round(float(v), 3) for v in np.percentile(boots, [2.5, 97.5])]
+        print(f"Undecided-at-T terms: n={len(y_und)}, churned {int(y_und.sum())} "
+              f"({y_und.mean():.1%}) vs mean predicted {p_und.mean():.1%}; "
+              f"intercept shift {shift:+.3f} (95% CI {shift_ci[0]:+.2f} .. {shift_ci[1]:+.2f})")
+    else:
+        print(f"Undecided-at-T terms: {len(y_und)} with {int(y_und.sum())} churners "
+              f"(< {MIN_UNDECIDED_CHURNERS}); no shift estimated.")
     if args.dry_run:
         print("Dry run: model file not written.")
         return
-    churn_model.save(b0_all, coef_all, {
+    churn_model.save(b0_all, coef_all, shift=shift, meta={
         "version": date.today().isoformat(),
         "rows": int(len(df)),
         "plan_end_range": [str(df["plan_end"].min().date()), str(df["plan_end"].max().date())],
@@ -207,6 +272,14 @@ def main() -> None:
             "prior_only_auc": round(base_auc, 4),
             "test_mean_predicted": round(float(p.mean()), 4),
             "test_actual_rate": round(float(y[test].mean()), 4),
+            "gain_vs_prior_only_ci95": [round(float(lo), 4), round(float(hi), 4)],
+        },
+        "undecided_calibration": {
+            "rows": int(len(y_und)),
+            "churned": int(y_und.sum()),
+            "rate": round(float(y_und.mean()), 4) if len(y_und) else None,
+            "shift_ci95": shift_ci,
+            "note": "in-sample; snapshots since 2026-05-22",
         },
     })
     print(f"Wrote {churn_model.MODEL_PATH}")

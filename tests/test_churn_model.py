@@ -15,6 +15,16 @@ def test_model_file_matches_feature_spec():
     # The shipped model must beat the prior-plans-only baseline on held-out terms.
     assert v["test_auc"] > v["prior_only_auc"]
     assert abs(v["test_mean_predicted"] - v["test_actual_rate"]) < 0.03
+    # Calibrated to the undecided (tiered) population: churners who already
+    # booked Gratis are routed by status, so the shift lowers the base rate.
+    assert model["undecided_intercept_shift"] < 0
+    assert model["training"]["undecided_calibration"]["churned"] >= 10
+
+
+def test_intercept_shift_hits_target_rate():
+    logits = np.linspace(-3, 1, 200)
+    d = churn_model.intercept_shift(logits, 0.10)
+    assert np.mean(1 / (1 + np.exp(-(logits + d)))) == pytest.approx(0.10, abs=1e-6)
 
 
 def test_features_handle_missing_values():

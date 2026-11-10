@@ -1,8 +1,16 @@
 """Fitted churn model: features, prediction and fitting (no sklearn needed).
 
 A logistic regression fitted on past renewal decisions (annual paid terms),
-with every input measured 60 days before the term's plan_end. The output is a
-calibrated probability that the supplier does NOT renew.
+with every input measured 60 days before the term's plan_end. The output is the
+probability that the supplier does NOT renew this term.
+
+Calibration: the weights are fitted on all annual terms, but most churners have
+already booked their Gratis downgrade 60 days out and are routed by status, not
+tiered. Suppliers still undecided at that point churn far less (about 9-13% vs
+22%), so the model file carries `undecided_intercept_shift`, estimated on terms
+whose daily snapshot showed them undecided 60 days before plan_end. Predictions
+include that shift: they are probabilities for the undecided population that
+actually receives tiers.
 
 The feature definitions below are the single source for both the refit script
 (jobs/fit_churn_model.py) and daily scoring (signals/churn_scorer.py), so
@@ -62,7 +70,8 @@ def predict(df: pd.DataFrame, model: dict | None = None) -> pd.Series:
     model = model or load()
     x = features(df)
     coef = np.array([model["coefficients"][name] for name in FEATURES])
-    logit = model["intercept"] + x.to_numpy() @ coef
+    intercept = model["intercept"] + model.get("undecided_intercept_shift", 0.0)
+    logit = intercept + x.to_numpy() @ coef
     return pd.Series(1.0 / (1.0 + np.exp(-logit)), index=df.index)
 
 
@@ -88,14 +97,30 @@ def fit(x: pd.DataFrame, y: pd.Series, l2: float = 1.0, iters: int = 100) -> tup
     return float(w[0]), {name: float(c) for name, c in zip(FEATURES, w[1:], strict=True)}
 
 
-def save(intercept: float, coefficients: dict, meta: dict, path: str = MODEL_PATH) -> None:
+def intercept_shift(logits: np.ndarray, target_rate: float) -> float:
+    """Shift d such that mean(sigmoid(logits + d)) == target_rate (bisection)."""
+    lo, hi = -10.0, 10.0
+    for _ in range(80):
+        mid = (lo + hi) / 2
+        if np.mean(1.0 / (1.0 + np.exp(-(logits + mid)))) > target_rate:
+            hi = mid
+        else:
+            lo = mid
+    return (lo + hi) / 2
+
+
+def save(
+    intercept: float, coefficients: dict, meta: dict, shift: float = 0.0, path: str = MODEL_PATH
+) -> None:
     model = {
         "model": "logistic_regression",
         "version": meta.get("version", date.today().isoformat()),
         "target": "P(paid term not renewed within 45 days of plan_end)",
         "horizon": "inputs measured 60 days before plan_end",
+        "population": "undecided suppliers (renewal_status = active) after the shift",
         "features": FEATURES,
         "intercept": round(intercept, 6),
+        "undecided_intercept_shift": round(shift, 6),
         "coefficients": {k: round(v, 6) for k, v in coefficients.items()},
         "training": meta,
     }

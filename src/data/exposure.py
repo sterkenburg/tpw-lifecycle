@@ -27,6 +27,7 @@ current/recent at-risk targeting; for a longer history, blend in raw
 """
 
 import os
+from datetime import date
 
 import yaml
 
@@ -74,20 +75,22 @@ def ensure_table() -> None:
 def build(start_date: str, end_date: str) -> int:
     """(Re)build supplier_exposure_daily for the inclusive [start_date, end_date].
 
-    Idempotent: deletes the date range first, then inserts. Only profile-days with
-    at least one event are written (the source skeleton is mostly empty). Returns
-    the number of rows inserted.
+    Idempotent and atomic: the DELETE and INSERT run in one BigQuery transaction,
+    so a failure leaves the previous rows intact (no gap in the shared rollup).
+    Only profile-days with at least one event are written (the source skeleton is
+    mostly empty). Returns the number of rows in the window after the rebuild.
 
     Args:
         start_date / end_date: 'YYYY-MM-DD'.
     """
+    start_date = str(date.fromisoformat(start_date))
+    end_date = str(date.fromisoformat(end_date))
     ensure_table()
 
-    # Idempotent refresh of the window.
-    client.execute(f"DELETE FROM `{_TABLE}` WHERE date BETWEEN '{start_date}' AND '{end_date}'")
-
-    job = client.execute(
+    client.execute(
         f"""
+        BEGIN TRANSACTION;
+        DELETE FROM `{_TABLE}` WHERE date BETWEEN '{start_date}' AND '{end_date}';
         INSERT INTO `{_TABLE}` ({_COLUMNS})
         SELECT
             profile_id, date, profile_views, impressions, list_clicks, show_phone,
@@ -111,7 +114,11 @@ def build(start_date: str, end_date: str) -> int:
             GROUP BY profile_id, date
         )
         WHERE profile_views > 0 OR impressions > 0 OR list_clicks > 0 OR show_phone > 0
-           OR website_open > 0 OR wishlist > 0 OR purchase > 0
+           OR website_open > 0 OR wishlist > 0 OR purchase > 0;
+        COMMIT TRANSACTION;
         """
     )
-    return job.num_dml_affected_rows or 0
+    rows = client.query_eu(
+        f"SELECT COUNT(*) AS n FROM `{_TABLE}` WHERE date BETWEEN '{start_date}' AND '{end_date}'"
+    )
+    return int(rows["n"].iloc[0])
