@@ -27,7 +27,7 @@ current/recent at-risk targeting; for a longer history, blend in raw
 """
 
 import os
-from datetime import date
+from datetime import date, timedelta
 
 import yaml
 
@@ -70,6 +70,26 @@ def ensure_table() -> None:
         PARTITION BY date
         """
     )
+
+
+def latest_date() -> date | None:
+    """Latest date present in the rollup (None when empty)."""
+    df = client.query_eu(f"SELECT MAX(date) AS d FROM `{_TABLE}`")
+    value = df["d"].iloc[0] if len(df) else None
+    if value is None or str(value) in ("NaT", "None", "nan"):
+        return None
+    return date.fromisoformat(str(value)[:10])
+
+
+def refresh_start(today: date, latest: date | None, overlap_days: int = 3,
+                  max_backfill_days: int = 120) -> date:
+    """First day to rebuild: overlap the newest rows already present, so a
+    multi-day outage is backfilled once the source catches up. Bounded so a
+    long-empty table does not trigger an unbounded rebuild."""
+    start = today - timedelta(days=overlap_days)
+    if latest is not None:
+        start = min(start, latest - timedelta(days=overlap_days))
+    return max(start, today - timedelta(days=max_backfill_days))
 
 
 def build(start_date: str, end_date: str) -> int:

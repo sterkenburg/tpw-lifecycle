@@ -20,7 +20,7 @@ experiment (both arms) via cohort.enrolled_ids().
 
 import sys
 from collections import Counter
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -37,6 +37,7 @@ from signals import churn_scorer, cohort, engagement
 # describe a past period while the snapshot is dated today: stop before writing
 # so the dashboard keeps the last good snapshot and the failed run is visible.
 MAX_VIEW_DATA_AGE_DAYS = 5
+VIEW_WINDOW_DAYS = 90   # activity.get_views_last_90d window; every day must have data
 
 _CONFIG_PATH = Path(__file__).parent.parent / "config" / "settings.yaml"
 with open(_CONFIG_PATH) as _f:
@@ -44,7 +45,11 @@ with open(_CONFIG_PATH) as _f:
 
 
 def check_view_freshness(df_activity: pd.DataFrame, today: date) -> pd.Timestamp:
-    """Latest view date in the feed; raise if missing or older than the limit."""
+    """Latest view date in the feed; raise if it is too old or has missing days.
+
+    The feed covers every profile, so each day of the 90-day window normally has
+    thousands of rows; a day without any row is a gap in the rollup.
+    """
     latest = df_activity["event_date"].max() if not df_activity.empty else pd.NaT
     age = (pd.Timestamp(today) - latest).days if pd.notna(latest) else None
     if age is None or age > MAX_VIEW_DATA_AGE_DAYS:
@@ -52,6 +57,15 @@ def check_view_freshness(df_activity: pd.DataFrame, today: date) -> pd.Timestamp
             f"Profile-view data is stale (latest {latest}, age {age} days, "
             f"limit {MAX_VIEW_DATA_AGE_DAYS}). Not publishing a snapshot; check the GA4 "
             "monthly_profile_stats source and the exposure refresh."
+        )
+    expected = pd.date_range(latest - pd.Timedelta(days=VIEW_WINDOW_DAYS - 1), latest, freq="D")
+    present = set(pd.to_datetime(df_activity["event_date"]).dt.normalize())
+    missing = [d.date() for d in expected if d not in present]
+    if missing:
+        raise RuntimeError(
+            f"Profile-view data has {len(missing)} missing day(s) in the "
+            f"{VIEW_WINDOW_DAYS}-day window (first: {missing[0]}). Not publishing; "
+            "backfill with jobs/build_exposure_daily.py <start> <end>."
         )
     return latest
 
@@ -65,14 +79,15 @@ def run():
     # 1. Load data
     # ------------------------------------------------------------------
     print("[1/7] Loading data...")
-    # Refresh the profile-view rollup first (last 3 days; the GA4 source lags ~2
-    # days). Atomic (one transaction), so a failure leaves the previous rows
-    # intact; the freshness check below decides whether they are recent enough.
+    # Refresh the profile-view rollup first. The window starts 3 days before the
+    # newest date already present (the GA4 source lags ~2 days), so days missed
+    # during an outage are rebuilt once the source catches up. Atomic (one
+    # transaction): a failure leaves the previous rows intact, and the check
+    # below decides whether the feed is complete and recent enough to publish.
     try:
-        refreshed = exposure.build(
-            (date.today() - timedelta(days=3)).isoformat(), date.today().isoformat()
-        )
-        print(f"        Exposure rollup refreshed: {refreshed:,} rows")
+        start = exposure.refresh_start(date.today(), exposure.latest_date())
+        refreshed = exposure.build(start.isoformat(), date.today().isoformat())
+        print(f"        Exposure rollup refreshed from {start}: {refreshed:,} rows")
     except Exception as e:
         print(f"        Exposure refresh failed (non-fatal): {e}")
     df_suppliers = suppliers.get_current()
