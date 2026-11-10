@@ -42,11 +42,8 @@ export function SupplierTable({ suppliers }: { suppliers: SupplierStats[] }) {
             <th className="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">
               Leads (60d)
             </th>
-            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider min-w-[18rem] lg:min-w-[24rem]">
               Risk
-            </th>
-            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
-              Action
             </th>
           </tr>
         </thead>
@@ -109,11 +106,8 @@ export function SupplierTable({ suppliers }: { suppliers: SupplierStats[] }) {
               <td className="px-4 py-3 text-sm text-gray-600 text-right whitespace-nowrap">
                 {s.leads_60d}
               </td>
-              <td className="px-4 py-3 text-sm text-gray-600 max-w-xs truncate">
+              <td className="px-4 py-3 text-sm text-gray-600 min-w-[18rem] lg:min-w-[24rem]">
                 {s.risk_factors}
-              </td>
-              <td className="px-4 py-3 text-sm text-gray-600 max-w-xs truncate">
-                {s.recommended_action}
               </td>
             </tr>
           ))}

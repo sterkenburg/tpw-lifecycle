@@ -42,9 +42,29 @@ function serializeValue(v: any): any {
   return v;
 }
 
-async function query<T = any>(sql: string): Promise<T[]> {
-  const [rows] = await bq.query({ query: sql, useLegacySql: false });
+async function query<T = any>(
+  sql: string,
+  params?: Record<string, string | number>
+): Promise<T[]> {
+  const [rows] = await bq.query({ query: sql, useLegacySql: false, params });
   return (rows as any[]).map((row) => serializeValue(row)) as T[];
+}
+
+// Optional history tables (e.g. intervention_log) may not exist in the dataset;
+// a missing table must not take down the whole supplier page.
+async function queryOptionalTable<T>(
+  sql: string,
+  params?: Record<string, string | number>
+): Promise<T[]> {
+  try {
+    return await query<T>(sql, params);
+  } catch (err: unknown) {
+    const e = err as { code?: number; message?: string } | null;
+    const notFound =
+      e?.code === 404 || /Not found: Table/i.test(String(e?.message));
+    if (notFound) return [];
+    throw err;
+  }
 }
 
 export type SupplierStats = {
@@ -118,11 +138,11 @@ export async function getSupplierById(
   const sql = `
     SELECT *
     FROM \`${PROJECT_ID}.${DATASET}.supplier_stats_daily\`
-    WHERE profile_id = '${profileId}'
+    WHERE profile_id = @profileId
     ORDER BY stats_date DESC
     LIMIT 1
   `;
-  const rows = await query<SupplierStats>(sql);
+  const rows = await query<SupplierStats>(sql, { profileId });
   return rows[0] ?? null;
 }
 
@@ -133,11 +153,11 @@ export async function getSupplierHistory(
   const sql = `
     SELECT *
     FROM \`${PROJECT_ID}.${DATASET}.supplier_stats_daily\`
-    WHERE profile_id = '${profileId}'
+    WHERE profile_id = @profileId
     ORDER BY stats_date DESC
-    LIMIT ${limit}
+    LIMIT @limit
   `;
-  return query<SupplierStats>(sql);
+  return query<SupplierStats>(sql, { profileId, limit });
 }
 
 export async function getActionsForSupplier(
@@ -146,10 +166,10 @@ export async function getActionsForSupplier(
   const sql = `
     SELECT *
     FROM \`${PROJECT_ID}.${DATASET}.actions_log\`
-    WHERE profile_id = '${profileId}'
+    WHERE profile_id = @profileId
     ORDER BY action_date DESC
   `;
-  return query<ActionLog>(sql);
+  return queryOptionalTable<ActionLog>(sql, { profileId });
 }
 
 export async function getInterventionsForSupplier(
@@ -158,10 +178,10 @@ export async function getInterventionsForSupplier(
   const sql = `
     SELECT *
     FROM \`${PROJECT_ID}.${DATASET}.intervention_log\`
-    WHERE profile_id = '${profileId}'
+    WHERE profile_id = @profileId
     ORDER BY created_at DESC
   `;
-  return query<InterventionLog>(sql);
+  return queryOptionalTable<InterventionLog>(sql, { profileId });
 }
 
 export async function getTodayActionCount(): Promise<number> {
